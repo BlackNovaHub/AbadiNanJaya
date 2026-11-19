@@ -1127,20 +1127,48 @@ function fm_kernel_info() {
     $server = isset($_SERVER['SERVER_SOFTWARE']) ? (string)$_SERVER['SERVER_SOFTWARE'] : '-';
     $sapi = defined('PHP_SAPI') ? PHP_SAPI : '-';
 
-    // Baris ringkas untuk UI (label => value), skip kosong
+    // CPU pendek (buang noise Windows "Family N Model N Stepping N")
+    $cpuShort = $cpus;
+    if ($cpuShort !== '') {
+        $nLog = '';
+        if (preg_match('/·\s*(\d+)\s*logical/i', $cpuShort, $mLog)) $nLog = $mLog[1];
+        $cpuShort = preg_replace('/\s*Family\s+\d+\s+Model\s+\d+\s+Stepping\s+\d+\s*,?\s*/i', ' ', $cpuShort);
+        $cpuShort = preg_replace('/\s*·\s*\d+\s*logical/i', '', $cpuShort);
+        $cpuShort = preg_replace('/\s+/', ' ', trim($cpuShort, " \t,"));
+        // "Intel64 GenuineIntel" → "GenuineIntel" / "AMD64 AuthenticAMD" → brand
+        if (preg_match('/\b(GenuineIntel|AuthenticAMD|Intel|AMD)\b/i', $cpuShort, $mb)) {
+            $cpuShort = $mb[1];
+            if (strcasecmp($cpuShort, 'GenuineIntel') === 0) $cpuShort = 'Intel';
+            if (strcasecmp($cpuShort, 'AuthenticAMD') === 0) $cpuShort = 'AMD';
+        }
+        if ($nLog !== '') $cpuShort .= ' · ' . $nLog . ' logical';
+    }
+
+    // Server pendek (buang ulang "PHP/x.y" di SERVER_SOFTWARE)
+    $serverShort = $server;
+    if ($serverShort !== '' && $serverShort !== '-') {
+        $serverShort = preg_replace('/\s*PHP\/[\d.]+/i', '', $serverShort);
+        $serverShort = trim(preg_replace('/\s+/', ' ', $serverShort));
+    }
+
+    // OS label: distro kalau ada, else family + release
+    $osLabel = $distro !== '' ? $distro : trim($family . ($release !== '' ? ' ' . $release : ''));
+    if ($osLabel === '') $osLabel = $os;
+
+    // Baris UI vertikal (label => value) — tanpa duplikat berantakan
     $lines = array();
     $lines['uname'] = $unameA;
-    if ($distro !== '') $lines['distro'] = $distro;
-    $lines['kernel'] = $kernel !== '' ? $kernel : $release;
+    if ($osLabel !== '') $lines['os'] = $osLabel;
+    $kVer = $kernel !== '' ? $kernel : $release;
+    if ($kVer !== '') $lines['kernel'] = $kVer;
     if ($arch !== '') $lines['arch'] = $arch;
     if ($host !== '') $lines['host'] = $host;
-    if ($cpus !== '') $lines['cpu'] = $cpus;
+    if ($cpuShort !== '') $lines['cpu'] = $cpuShort;
     if ($load !== '') $lines['load'] = $load;
     if ($uptime !== '') $lines['uptime'] = $uptime;
     if ($user !== '') $lines['user'] = $user;
     $lines['php'] = PHP_VERSION . ' · ' . $sapi;
-    if ($server !== '' && $server !== '-') $lines['server'] = $server;
-    $lines['family'] = $family;
+    if ($serverShort !== '' && $serverShort !== '-') $lines['server'] = $serverShort;
 
     return array(
         'uname' => $unameA,
@@ -1150,15 +1178,15 @@ function fm_kernel_info() {
         'version' => $version,
         'machine' => $machine,
         'host' => $host,
-        'distro' => $distro,
-        'kernel' => $kernel,
+        'distro' => $distro !== '' ? $distro : $osLabel,
+        'kernel' => $kVer,
         'arch' => $arch,
-        'cpus' => $cpus,
+        'cpus' => $cpuShort,
         'load' => $load,
         'uptime' => $uptime,
         'user' => $user,
         'sapi' => $sapi,
-        'server' => $server,
+        'server' => $serverShort,
         'php' => PHP_VERSION,
         'lines' => $lines,
     );
@@ -2378,66 +2406,96 @@ a { color: var(--accent); text-decoration: none; }
 .main { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .content { display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1; }
 
-/* ===== Kernel / OS banner ===== */
+/* ===== Kernel / OS banner (vertical) ===== */
 .kernel-bar {
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 10px var(--pad-x) 8px;
-  background: linear-gradient(180deg, #0d1608 0%, #0a1006 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  background: linear-gradient(180deg, #0d1508 0%, #0a1006 100%);
   border-bottom: 1px solid var(--border);
   min-width: 0;
 }
-.kernel-bar-top {
-  display: flex; align-items: flex-start; gap: 10px; min-width: 0;
+.kernel-bar-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px var(--pad-x);
+  border-bottom: 1px solid rgba(36, 48, 22, 0.85);
+  background: rgba(192, 240, 0, 0.04);
 }
 .kernel-badge {
   flex-shrink: 0;
-  font-size: 9px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .12em;
+  text-transform: uppercase;
   color: #0a1000;
   background: linear-gradient(135deg, #9ad400, #c0f000);
-  padding: 5px 9px; border-radius: 6px;
+  padding: 4px 8px;
+  border-radius: 5px;
   box-shadow: 0 0 10px var(--glow);
-  margin-top: 1px;
 }
-.kernel-uname {
-  flex: 1; min-width: 0;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 11.5px; line-height: 1.45; font-weight: 500;
-  color: var(--primary);
-  word-break: break-word;
-  white-space: pre-wrap;
-}
-.kernel-chips {
-  display: flex; flex-wrap: wrap; gap: 6px;
-  min-width: 0;
-}
-.kernel-chip {
-  display: inline-flex; align-items: baseline; gap: 5px;
-  max-width: 100%;
-  padding: 4px 9px;
-  border-radius: 7px;
-  border: 1px solid var(--border);
-  background: rgba(0,0,0,.35);
+.kernel-bar-head .kernel-title {
   font-size: 11px;
-  line-height: 1.35;
+  font-weight: 650;
+  color: var(--muted);
+  letter-spacing: .02em;
+}
+.kernel-table {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
   min-width: 0;
 }
-.kernel-chip .kk {
-  flex-shrink: 0;
-  font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
+.kernel-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 7px var(--pad-x);
+  border-bottom: 1px solid rgba(36, 48, 22, 0.55);
+  min-width: 0;
+}
+.kernel-row:last-child { border-bottom: 0; }
+.kernel-row:nth-child(even) { background: rgba(0, 0, 0, 0.18); }
+.kernel-row:hover { background: rgba(192, 240, 0, 0.05); }
+.kernel-row .kk {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
   color: var(--muted2);
+  padding-top: 1px;
+  line-height: 1.4;
 }
-.kernel-chip .kv {
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 11px; font-weight: 500;
+.kernel-row .kv {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
   color: var(--text);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  max-width: min(420px, 70vw);
+  line-height: 1.45;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
-.kernel-chip.chip-os .kv { color: var(--primary); }
-.kernel-chip.chip-cpu .kv { color: var(--accent); }
-@media (max-width: 720px) {
-  .kernel-chip .kv { white-space: normal; max-width: 100%; }
-  .kernel-uname { font-size: 10.5px; }
+.kernel-row.row-uname .kv {
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+.kernel-row.row-os .kv,
+.kernel-row.row-kernel .kv { color: var(--primary); }
+.kernel-row.row-cpu .kv { color: var(--accent); }
+.kernel-row.row-php .kv { color: #b8e060; }
+@media (max-width: 560px) {
+  .kernel-row {
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 8px;
+    padding: 6px var(--pad-x);
+  }
+  .kernel-row .kk { font-size: 9px; }
+  .kernel-row .kv { font-size: 11px; }
 }
 
 /* ===== Tools ===== */
@@ -3024,33 +3082,42 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
     <section class="content">
 
       <?php
-        $kChipOrder = array(
-          'distro' => 'OS',
-          'family' => 'Family',
+        $kRowOrder = array(
+          'uname'  => 'uname',
+          'os'     => 'OS',
           'kernel' => 'Kernel',
-          'arch' => 'Arch',
-          'host' => 'Host',
-          'cpu' => 'CPU',
-          'load' => 'Load',
+          'arch'   => 'Arch',
+          'host'   => 'Host',
+          'cpu'    => 'CPU',
+          'load'   => 'Load',
           'uptime' => 'Uptime',
-          'user' => 'User',
-          'php' => 'PHP',
+          'user'   => 'User',
+          'php'    => 'PHP',
           'server' => 'Server',
         );
-        $kChipClass = array('distro' => 'chip-os', 'cpu' => 'chip-cpu', 'kernel' => 'chip-os');
+        $kUnameShow = !empty($fmKernel['uname'])
+          ? $fmKernel['uname']
+          : trim($fmKernel['os'] . ' ' . $fmKernel['release'] . ' ' . $fmKernel['machine']);
       ?>
-      <div class="kernel-bar" id="kernelBar" title="Kernel &amp; OS info (php_uname / platform)">
-        <div class="kernel-bar-top">
+      <div class="kernel-bar" id="kernelBar" title="Kernel &amp; OS info">
+        <div class="kernel-bar-head">
           <span class="kernel-badge">Kernel</span>
-          <div class="kernel-uname" id="kernelUname"><?= htmlspecialchars($fmKernel['uname'] !== '' ? $fmKernel['uname'] : ($fmKernel['os'] . ' ' . $fmKernel['release'])) ?></div>
+          <span class="kernel-title">System information</span>
         </div>
-        <div class="kernel-chips" id="kernelChips">
-          <?php foreach ($kChipOrder as $key => $label):
-            if ($key === 'uname') continue;
-            if (empty($fmKernel['lines'][$key])) continue;
-            $cls = isset($kChipClass[$key]) ? ' ' . $kChipClass[$key] : '';
+        <div class="kernel-table" id="kernelTable">
+          <?php foreach ($kRowOrder as $key => $label):
+            if ($key === 'uname') {
+              $val = $kUnameShow;
+            } else {
+              if (empty($fmKernel['lines'][$key])) continue;
+              $val = $fmKernel['lines'][$key];
+            }
+            if ($val === '' || $val === null) continue;
           ?>
-          <span class="kernel-chip<?= $cls ?>"><span class="kk"><?= htmlspecialchars($label) ?></span><span class="kv" title="<?= htmlspecialchars($fmKernel['lines'][$key]) ?>"><?= htmlspecialchars($fmKernel['lines'][$key]) ?></span></span>
+          <div class="kernel-row row-<?= htmlspecialchars($key) ?>">
+            <div class="kk"><?= htmlspecialchars($label) ?></div>
+            <div class="kv" <?= $key === 'uname' ? 'id="kernelUname"' : '' ?> title="<?= htmlspecialchars($val) ?>"><?= htmlspecialchars($val) ?></div>
+          </div>
           <?php endforeach; ?>
         </div>
       </div>
