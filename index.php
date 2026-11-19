@@ -952,6 +952,218 @@ function root_label() {
     if ($r === '/' || $r === '') return '/';
     return $r;
 }
+/**
+ * Info kernel / OS lintas platform (Linux, Windows, macOS, BSD, dll).
+ * Mengutamakan API PHP + file sistem; shell opsional jika tersedia.
+ * @return array{uname:string,os:string,family:string,release:string,version:string,machine:string,host:string,distro:string,kernel:string,arch:string,cpus:string,load:string,uptime:string,user:string,sapi:string,server:string,lines:array}
+ */
+function fm_kernel_info() {
+    $unameA = function_exists('php_uname') ? (string) @php_uname('a') : '';
+    $os = function_exists('php_uname') ? (string) @php_uname('s') : (defined('PHP_OS') ? PHP_OS : 'Unknown');
+    $host = function_exists('php_uname') ? (string) @php_uname('n') : (isset($_SERVER['SERVER_NAME']) ? (string)$_SERVER['SERVER_NAME'] : '-');
+    $release = function_exists('php_uname') ? (string) @php_uname('r') : '';
+    $version = function_exists('php_uname') ? (string) @php_uname('v') : '';
+    $machine = function_exists('php_uname') ? (string) @php_uname('m') : '';
+    $family = defined('PHP_OS_FAMILY') ? PHP_OS_FAMILY : (fm_is_win() ? 'Windows' : $os);
+
+    $distro = '';
+    $kernel = $release;
+    $arch = $machine;
+    $cpus = '';
+    $load = '';
+    $uptime = '';
+    $user = '';
+
+    // Current process user
+    if (function_exists('posix_getpwuid') && function_exists('posix_geteuid')) {
+        $pw = @posix_getpwuid(@posix_geteuid());
+        if (is_array($pw) && !empty($pw['name'])) $user = (string)$pw['name'];
+    }
+    if ($user === '' && function_exists('get_current_user')) {
+        $cu = @get_current_user();
+        if (is_string($cu) && $cu !== '') $user = $cu;
+    }
+    if ($user === '') {
+        foreach (array('USER', 'USERNAME', 'LOGNAME') as $ek) {
+            $ev = getenv($ek);
+            if (is_string($ev) && $ev !== '') { $user = $ev; break; }
+        }
+    }
+
+    // ----- Linux / Unix-like -----
+    if (!fm_is_win()) {
+        // Distro dari /etc/os-release
+        $osRel = '';
+        foreach (array('/etc/os-release', '/usr/lib/os-release') as $f) {
+            if (@is_readable($f)) { $osRel = (string) @file_get_contents($f); if ($osRel !== '') break; }
+        }
+        if ($osRel !== '') {
+            if (preg_match('/^PRETTY_NAME=(.+)$/m', $osRel, $m)) {
+                $distro = trim($m[1], " \t\"'");
+            } elseif (preg_match('/^NAME=(.+)$/m', $osRel, $m)) {
+                $distro = trim($m[1], " \t\"'");
+                if (preg_match('/^VERSION=(.+)$/m', $osRel, $m2)) {
+                    $distro .= ' ' . trim($m2[1], " \t\"'");
+                }
+            }
+        }
+        if ($distro === '' && @is_readable('/etc/redhat-release')) {
+            $distro = trim((string) @file_get_contents('/etc/redhat-release'));
+        }
+        if ($distro === '' && @is_readable('/etc/debian_version')) {
+            $distro = 'Debian ' . trim((string) @file_get_contents('/etc/debian_version'));
+        }
+
+        // CPU model + count
+        if (@is_readable('/proc/cpuinfo')) {
+            $ci = (string) @file_get_contents('/proc/cpuinfo');
+            $n = preg_match_all('/^processor\s*:/m', $ci);
+            if (preg_match('/^model name\s*:\s*(.+)$/m', $ci, $m)) {
+                $cpus = trim($m[1]);
+                if ($n > 0) $cpus .= ' ×' . $n;
+            } elseif ($n > 0) {
+                $cpus = $n . ' CPU(s)';
+            }
+        }
+        if ($cpus === '' && ($n = getenv('NUMBER_OF_PROCESSORS')) !== false && $n !== '') {
+            $cpus = $n . ' CPU(s)';
+        }
+
+        // Load average
+        if (function_exists('sys_getloadavg')) {
+            $la = @sys_getloadavg();
+            if (is_array($la) && count($la) >= 3) {
+                $load = sprintf('%.2f %.2f %.2f', $la[0], $la[1], $la[2]);
+            }
+        }
+        if ($load === '' && @is_readable('/proc/loadavg')) {
+            $la = trim((string) @file_get_contents('/proc/loadavg'));
+            if (preg_match('/^([\d.]+)\s+([\d.]+)\s+([\d.]+)/', $la, $m)) {
+                $load = $m[1] . ' ' . $m[2] . ' ' . $m[3];
+            }
+        }
+
+        // Uptime
+        if (@is_readable('/proc/uptime')) {
+            $up = trim((string) @file_get_contents('/proc/uptime'));
+            $sec = (int) floatval($up);
+            if ($sec > 0) {
+                $d = intdiv($sec, 86400); $sec %= 86400;
+                $h = intdiv($sec, 3600); $sec %= 3600;
+                $mi = intdiv($sec, 60);
+                $parts = array();
+                if ($d > 0) $parts[] = $d . 'd';
+                if ($h > 0 || $d > 0) $parts[] = $h . 'h';
+                $parts[] = $mi . 'm';
+                $uptime = implode(' ', $parts);
+            }
+        }
+
+        // macOS sw_vers via files if present
+        if ($distro === '' && (stripos($os, 'Darwin') !== false || $family === 'Darwin')) {
+            $distro = 'macOS';
+            if (@is_readable('/System/Library/CoreServices/SystemVersion.plist')) {
+                $pl = (string) @file_get_contents('/System/Library/CoreServices/SystemVersion.plist');
+                if (preg_match('/ProductVersion<\/key>\s*<string>([^<]+)/', $pl, $m)) {
+                    $distro = 'macOS ' . $m[1];
+                }
+            }
+        }
+    }
+
+    // ----- Windows -----
+    if (fm_is_win()) {
+        $cn = getenv('COMPUTERNAME');
+        if (is_string($cn) && $cn !== '') $host = $cn;
+        $pa = getenv('PROCESSOR_ARCHITECTURE');
+        if (is_string($pa) && $pa !== '') $arch = $pa;
+        $pi = getenv('PROCESSOR_IDENTIFIER');
+        if (is_string($pi) && $pi !== '') $cpus = $pi;
+        $np = getenv('NUMBER_OF_PROCESSORS');
+        if (is_string($np) && $np !== '') {
+            $cpus = ($cpus !== '' ? $cpus . ' · ' : '') . $np . ' logical';
+        }
+        // Build number from php_uname version: e.g. build 26100
+        $distro = 'Windows';
+        if (preg_match('/build\s+(\d+)/i', $version . ' ' . $unameA, $m)) {
+            $distro = 'Windows build ' . $m[1];
+        }
+        if (defined('PHP_WINDOWS_VERSION_MAJOR')) {
+            $distro = 'Windows ' . PHP_WINDOWS_VERSION_MAJOR
+                . (defined('PHP_WINDOWS_VERSION_MINOR') ? '.' . PHP_WINDOWS_VERSION_MINOR : '')
+                . (defined('PHP_WINDOWS_VERSION_BUILD') ? ' (build ' . PHP_WINDOWS_VERSION_BUILD . ')' : '');
+        }
+        // Kernel = NT release
+        $kernel = $release !== '' ? $release : $version;
+    }
+
+    // Opsional: uname -a via shell kalau ada (lebih lengkap di beberapa host)
+    if ($unameA === '' || strlen($unameA) < 8) {
+        foreach (array('shell_exec', 'exec') as $runner) {
+            if (!function_exists($runner)) continue;
+            $d = strtolower((string) @ini_get('disable_functions'));
+            if ($d !== '' && strpos($d, strtolower($runner)) !== false) continue;
+            if (fm_is_win()) {
+                $cmd = 'ver';
+            } else {
+                $cmd = 'uname -a';
+            }
+            $out = '';
+            if ($runner === 'shell_exec') {
+                $out = (string) @shell_exec($cmd . (fm_is_win() ? '' : ' 2>/dev/null'));
+            } else {
+                $lines = array();
+                @exec($cmd, $lines);
+                $out = implode(' ', $lines);
+            }
+            $out = trim($out);
+            if ($out !== '') { $unameA = $out; break; }
+        }
+    }
+    if ($unameA === '') {
+        $unameA = trim(implode(' ', array_filter(array($os, $host, $release, $version, $machine))));
+    }
+
+    $server = isset($_SERVER['SERVER_SOFTWARE']) ? (string)$_SERVER['SERVER_SOFTWARE'] : '-';
+    $sapi = defined('PHP_SAPI') ? PHP_SAPI : '-';
+
+    // Baris ringkas untuk UI (label => value), skip kosong
+    $lines = array();
+    $lines['uname'] = $unameA;
+    if ($distro !== '') $lines['distro'] = $distro;
+    $lines['kernel'] = $kernel !== '' ? $kernel : $release;
+    if ($arch !== '') $lines['arch'] = $arch;
+    if ($host !== '') $lines['host'] = $host;
+    if ($cpus !== '') $lines['cpu'] = $cpus;
+    if ($load !== '') $lines['load'] = $load;
+    if ($uptime !== '') $lines['uptime'] = $uptime;
+    if ($user !== '') $lines['user'] = $user;
+    $lines['php'] = PHP_VERSION . ' · ' . $sapi;
+    if ($server !== '' && $server !== '-') $lines['server'] = $server;
+    $lines['family'] = $family;
+
+    return array(
+        'uname' => $unameA,
+        'os' => $os,
+        'family' => $family,
+        'release' => $release,
+        'version' => $version,
+        'machine' => $machine,
+        'host' => $host,
+        'distro' => $distro,
+        'kernel' => $kernel,
+        'arch' => $arch,
+        'cpus' => $cpus,
+        'load' => $load,
+        'uptime' => $uptime,
+        'user' => $user,
+        'sapi' => $sapi,
+        'server' => $server,
+        'php' => PHP_VERSION,
+        'lines' => $lines,
+    );
+}
+
 function fm_home_rel() {
     // Prioritas: folder script yang dieksekusi (SCRIPT_FILENAME), lalu __FILE__
     // Supaya home = lokasi FM di disk, bukan selalu root "/"
@@ -1799,6 +2011,7 @@ if ($__fm_is_api) {
                 $diskTotal = @disk_total_space(FM_ROOT);
                 $diskFree = @disk_free_space(FM_ROOT);
                 $exts = get_loaded_extensions(); sort($exts);
+                $k = fm_kernel_info();
                 json_out(array(
                     'ok'=>true,
                     'php'=>PHP_VERSION,'sapi'=>PHP_SAPI,
@@ -1818,6 +2031,17 @@ if ($__fm_is_api) {
                     'extensions'=>$exts,
                     'disabled'=>ini_get('disable_functions'),
                     'pdo_drivers'=>class_exists('PDO')?PDO::getAvailableDrivers():array(),
+                    'uname'=>$k['uname'],
+                    'kernel'=>$k['kernel'],
+                    'distro'=>$k['distro'],
+                    'arch'=>$k['arch'],
+                    'host'=>$k['host'],
+                    'cpus'=>$k['cpus'],
+                    'load'=>$k['load'],
+                    'uptime'=>$k['uptime'],
+                    'user'=>$k['user'],
+                    'family'=>$k['family'],
+                    'kernel_lines'=>$k['lines'],
                 ));
             }
 
@@ -2025,6 +2249,7 @@ $hasPass = (FM_AUTH_MODE !== 'none') ? '1' : '0';
 $fmLogoUri = FM_LOGO_URL;
 $fmIconUri = FM_ICON_URL;
 $fmTitle = fm_page_title();
+$fmKernel = fm_kernel_info();
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -2152,6 +2377,68 @@ a { color: var(--accent); text-decoration: none; }
 /* ===== Layout ===== */
 .main { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .content { display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1; }
+
+/* ===== Kernel / OS banner ===== */
+.kernel-bar {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px var(--pad-x) 8px;
+  background: linear-gradient(180deg, #0d1608 0%, #0a1006 100%);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.kernel-bar-top {
+  display: flex; align-items: flex-start; gap: 10px; min-width: 0;
+}
+.kernel-badge {
+  flex-shrink: 0;
+  font-size: 9px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase;
+  color: #0a1000;
+  background: linear-gradient(135deg, #9ad400, #c0f000);
+  padding: 5px 9px; border-radius: 6px;
+  box-shadow: 0 0 10px var(--glow);
+  margin-top: 1px;
+}
+.kernel-uname {
+  flex: 1; min-width: 0;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11.5px; line-height: 1.45; font-weight: 500;
+  color: var(--primary);
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.kernel-chips {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  min-width: 0;
+}
+.kernel-chip {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  max-width: 100%;
+  padding: 4px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: rgba(0,0,0,.35);
+  font-size: 11px;
+  line-height: 1.35;
+  min-width: 0;
+}
+.kernel-chip .kk {
+  flex-shrink: 0;
+  font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted2);
+}
+.kernel-chip .kv {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px; font-weight: 500;
+  color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: min(420px, 70vw);
+}
+.kernel-chip.chip-os .kv { color: var(--primary); }
+.kernel-chip.chip-cpu .kv { color: var(--accent); }
+@media (max-width: 720px) {
+  .kernel-chip .kv { white-space: normal; max-width: 100%; }
+  .kernel-uname { font-size: 10.5px; }
+}
 
 /* ===== Tools ===== */
 .tools-bar {
@@ -2735,6 +3022,38 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
 
   <div class="main">
     <section class="content">
+
+      <?php
+        $kChipOrder = array(
+          'distro' => 'OS',
+          'family' => 'Family',
+          'kernel' => 'Kernel',
+          'arch' => 'Arch',
+          'host' => 'Host',
+          'cpu' => 'CPU',
+          'load' => 'Load',
+          'uptime' => 'Uptime',
+          'user' => 'User',
+          'php' => 'PHP',
+          'server' => 'Server',
+        );
+        $kChipClass = array('distro' => 'chip-os', 'cpu' => 'chip-cpu', 'kernel' => 'chip-os');
+      ?>
+      <div class="kernel-bar" id="kernelBar" title="Kernel &amp; OS info (php_uname / platform)">
+        <div class="kernel-bar-top">
+          <span class="kernel-badge">Kernel</span>
+          <div class="kernel-uname" id="kernelUname"><?= htmlspecialchars($fmKernel['uname'] !== '' ? $fmKernel['uname'] : ($fmKernel['os'] . ' ' . $fmKernel['release'])) ?></div>
+        </div>
+        <div class="kernel-chips" id="kernelChips">
+          <?php foreach ($kChipOrder as $key => $label):
+            if ($key === 'uname') continue;
+            if (empty($fmKernel['lines'][$key])) continue;
+            $cls = isset($kChipClass[$key]) ? ' ' . $kChipClass[$key] : '';
+          ?>
+          <span class="kernel-chip<?= $cls ?>"><span class="kk"><?= htmlspecialchars($label) ?></span><span class="kv" title="<?= htmlspecialchars($fmKernel['lines'][$key]) ?>"><?= htmlspecialchars($fmKernel['lines'][$key]) ?></span></span>
+          <?php endforeach; ?>
+        </div>
+      </div>
 
       <div class="tools-bar" id="toolsBar">
         <span class="tools-label">Tools</span>
@@ -3655,12 +3974,29 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
     openModal({ title:'Server Info', wide:true, body:'<div style="padding:16px" id="sysBox"><div style="color:var(--muted)">Memuat…</div></div>', confirmText:'', cancelText:'Tutup' });
     api('sysinfo').then(function(r){
       var rows = [
-        ['PHP', r.php + ' · ' + r.sapi],['OS', r.os],['Server', r.server_soft],['Host', r.server_name],
-        ['Document root', r.docroot],['FM root', r.fm_root],['FM home', r.fm_home],
-        ['Time', r.time + ' (' + r.timezone + ')'],['Disk free', r.disk_free + ' / ' + r.disk_total],
-        ['memory_limit', r.memory_limit],['upload_max', r.upload_max],['post_max', r.post_max],
-        ['max_exec', r.max_exec],['PDO', (r.pdo_drivers||[]).join(', ') || '-'],
-        ['Extensions', (r.extensions||[]).length + ' loaded'],['Disabled', r.disabled || '-']
+        ['uname -a', r.uname || '-'],
+        ['OS / Family', (r.distro || r.os || '-') + (r.family ? ' · ' + r.family : '')],
+        ['Kernel', r.kernel || '-'],
+        ['Arch', r.arch || '-'],
+        ['Host', r.host || r.server_name || '-'],
+        ['CPU', r.cpus || '-'],
+        ['Load avg', r.load || '-'],
+        ['Uptime', r.uptime || '-'],
+        ['User', r.user || '-'],
+        ['PHP', r.php + ' · ' + r.sapi],
+        ['Server', r.server_soft],
+        ['Document root', r.docroot],
+        ['FM root', r.fm_root],
+        ['FM home', r.fm_home],
+        ['Time', r.time + ' (' + r.timezone + ')'],
+        ['Disk free', r.disk_free + ' / ' + r.disk_total],
+        ['memory_limit', r.memory_limit],
+        ['upload_max', r.upload_max],
+        ['post_max', r.post_max],
+        ['max_exec', r.max_exec],
+        ['PDO', (r.pdo_drivers||[]).join(', ') || '-'],
+        ['Extensions', (r.extensions||[]).length + ' loaded'],
+        ['Disabled', r.disabled || '-']
       ];
       $('#sysBox').innerHTML = '<div class="sys-grid">' + rows.map(function(x){ return '<div class="k">'+esc(x[0])+'</div><div class="v">'+esc(x[1])+'</div>'; }).join('') + '</div>'
         + '<details style="margin-top:14px"><summary style="cursor:pointer;color:var(--primary);font-weight:600">Extensions list</summary>'
