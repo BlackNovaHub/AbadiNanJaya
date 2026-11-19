@@ -902,7 +902,13 @@ function safe_path($rel) {
         }
     }
     if ($parts) {
-        $full = rtrim(FM_ROOT, "\\/") . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $parts);
+        $root = FM_ROOT;
+        // rtrim('/', '/') = '' → path absolut Linux harus tetap diawali /
+        if ($root === '/' || $root === '\\' || $root === '') {
+            $full = '/' . implode(DIRECTORY_SEPARATOR, $parts);
+        } else {
+            $full = rtrim($root, "\\/") . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $parts);
+        }
     } else {
         $full = FM_ROOT;
     }
@@ -917,16 +923,25 @@ function safe_path($rel) {
 function rel_from_full($full) {
     $root = root_norm();
     $path = fm_norm($full);
-    if (fm_path_eq($path, $root)) return '';
+    if ($path === '' || fm_path_eq($path, $root)) return '';
     $rootCmp = fm_is_win() ? strtolower($root) : $root;
     $pathCmp = fm_is_win() ? strtolower($path) : $path;
+    // Windows drive root: C:
     if (preg_match('#^[A-Za-z]:$#', $root)) {
         if (strlen($pathCmp) > 2 && $pathCmp[1] === ':' && $pathCmp[2] === '/' && strtolower($path[0]) === strtolower($root[0])) {
             return substr($path, 3);
         }
         return '';
     }
-    if (strpos($pathCmp, $rootCmp . '/') === 0) {
+    // Filesystem root "/" — jangan gabung jadi "//" (bug: home selalu kosong di Linux)
+    if ($root === '/' || $root === '') {
+        if (isset($pathCmp[0]) && $pathCmp[0] === '/') {
+            return ltrim($path, '/');
+        }
+        return '';
+    }
+    $prefix = $rootCmp . '/';
+    if (strpos($pathCmp, $prefix) === 0) {
         return substr($path, strlen($root) + 1);
     }
     return '';
@@ -938,6 +953,36 @@ function root_label() {
     return $r;
 }
 function fm_home_rel() {
+    // Prioritas: folder script yang dieksekusi (SCRIPT_FILENAME), lalu __FILE__
+    // Supaya home = lokasi FM di disk, bukan selalu root "/"
+    $candidates = array();
+    if (!empty($_SERVER['SCRIPT_FILENAME'])) {
+        $sf = (string)$_SERVER['SCRIPT_FILENAME'];
+        $candidates[] = is_dir($sf) ? $sf : dirname($sf);
+    }
+    if (!empty($_SERVER['SCRIPT_NAME']) && !empty($_SERVER['DOCUMENT_ROOT'])) {
+        $sn = str_replace('\\', '/', (string)$_SERVER['SCRIPT_NAME']);
+        $dr = rtrim(str_replace('\\', '/', (string)$_SERVER['DOCUMENT_ROOT']), '/');
+        $joined = $dr . '/' . ltrim($sn, '/');
+        $candidates[] = dirname($joined);
+    }
+    $candidates[] = dirname(__FILE__);
+    foreach ($candidates as $cand) {
+        $cand = (string)$cand;
+        if ($cand === '') continue;
+        // pastikan folder, bukan file
+        $rp = @realpath($cand);
+        if ($rp !== false) {
+            $here = is_dir($rp) ? $rp : dirname($rp);
+        } else {
+            $here = is_file($cand) ? dirname($cand) : $cand;
+        }
+        $here = fm_norm($here);
+        if ($here === '' || $here === '/' || preg_match('#^[A-Za-z]:$#', $here)) continue;
+        if (!under_root($here)) continue;
+        $rel = rel_from_full($here);
+        if ($rel !== '') return $rel;
+    }
     $here = @realpath(dirname(__FILE__));
     if ($here === false) $here = dirname(__FILE__);
     return rel_from_full($here);
@@ -1966,6 +2011,16 @@ $fmName = FM_NAME;
 $fmVer = FM_VERSION;
 $fmRoot = FM_ROOT;
 $fmHome = fm_home_rel();
+// Full path folder home (lokasi file manager di disk)
+if ($fmHome !== '') {
+    if ($fmRoot === '/' || $fmRoot === '\\' || $fmRoot === '') {
+        $fmHomeFull = '/' . str_replace('\\', '/', $fmHome);
+    } else {
+        $fmHomeFull = rtrim($fmRoot, "\\/") . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $fmHome);
+    }
+} else {
+    $fmHomeFull = $fmRoot;
+}
 $hasPass = (FM_AUTH_MODE !== 'none') ? '1' : '0';
 $fmLogoUri = FM_LOGO_URL;
 $fmIconUri = FM_ICON_URL;
@@ -2694,7 +2749,7 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
 
       <div class="pwd-bar">
         <span class="pwd-label">PWD</span>
-        <div class="pwd-path" id="pwdPath" data-full="<?= htmlspecialchars(($fmHome !== '' ? (rtrim($fmRoot, "\\/") . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $fmHome)) : $fmRoot)) ?>" title="Klik nama folder untuk pindah"></div>
+        <div class="pwd-path" id="pwdPath" data-full="<?= htmlspecialchars($fmHomeFull) ?>" title="Klik nama folder untuk pindah"></div>
         <button class="btn btn-ghost" id="btnHome" title="Ke folder file manager"><?= icon('folder') ?> Home</button>
         <button class="btn btn-ghost" id="btnCopyPwd" title="Salin path"><?= icon('copy') ?></button>
       </div>
