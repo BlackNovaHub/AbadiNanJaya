@@ -3121,6 +3121,19 @@ a { color: var(--accent); text-decoration: none; }
   padding: 8px var(--pad-x);
   border-bottom: 1px solid rgba(36, 48, 22, 0.85);
   background: rgba(192, 240, 0, 0.04);
+  cursor: pointer;
+  user-select: none;
+  width: 100%;
+  box-sizing: border-box;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.kernel-bar-head:hover { background: rgba(192, 240, 0, 0.08); }
+.kernel-bar-head:focus-visible {
+  outline: 1px solid var(--primary);
+  outline-offset: -2px;
 }
 .kernel-badge {
   flex-shrink: 0;
@@ -3139,12 +3152,48 @@ a { color: var(--accent); text-decoration: none; }
   font-weight: 650;
   color: var(--muted);
   letter-spacing: .02em;
+  flex: 1;
+  min-width: 0;
 }
+.kernel-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid rgba(192, 240, 0, 0.22);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--primary);
+  transition: transform .18s ease, background .15s ease, border-color .15s ease;
+}
+.kernel-bar-head:hover .kernel-toggle {
+  border-color: rgba(192, 240, 0, 0.45);
+  background: rgba(192, 240, 0, 0.1);
+}
+.kernel-toggle svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  transition: transform .18s ease;
+}
+.kernel-bar.is-collapsed .kernel-bar-head { border-bottom: 0; }
+.kernel-bar.is-collapsed .kernel-toggle svg { transform: rotate(-90deg); }
 .kernel-table {
   display: flex;
   flex-direction: column;
   width: 100%;
   min-width: 0;
+  overflow: hidden;
+  max-height: 2000px;
+  opacity: 1;
+  transition: max-height .22s ease, opacity .18s ease;
+}
+.kernel-bar.is-collapsed .kernel-table {
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 .kernel-row {
   display: grid;
@@ -3808,10 +3857,13 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
           : trim($fmKernel['os'] . ' ' . $fmKernel['release'] . ' ' . $fmKernel['machine']);
       ?>
       <div class="kernel-bar" id="kernelBar" title="Kernel &amp; OS info">
-        <div class="kernel-bar-head">
+        <button type="button" class="kernel-bar-head" id="kernelToggle" aria-expanded="true" aria-controls="kernelTable" title="Show / hide system info">
           <span class="kernel-badge">Kernel</span>
           <span class="kernel-title">System information</span>
-        </div>
+          <span class="kernel-toggle" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </span>
+        </button>
         <div class="kernel-table" id="kernelTable">
           <?php foreach ($kRowOrder as $key => $label):
             if ($key === 'uname') {
@@ -5103,6 +5155,25 @@ tr:hover .row-acts, tr.selected .row-acts { opacity: 1; }
   try {
     api('lock_status').then(refreshLockBtn).catch(function () {});
   } catch (e) {}
+
+  (function initKernelToggle() {
+    var bar = document.getElementById('kernelBar');
+    var btn = document.getElementById('kernelToggle');
+    if (!bar || !btn) return;
+    var key = 'abadi_kernel_open';
+    function apply(open) {
+      bar.classList.toggle('is-collapsed', !open);
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      btn.title = open ? 'Hide system info' : 'Show system info';
+      try { localStorage.setItem(key, open ? '1' : '0'); } catch (e) {}
+    }
+    var saved = null;
+    try { saved = localStorage.getItem(key); } catch (e) {}
+    apply(saved === null ? true : saved === '1');
+    btn.addEventListener('click', function () {
+      apply(bar.classList.contains('is-collapsed'));
+    });
+  })();
 
   $('#btnAddFile').onclick = openAddFile;
   $('#btnAddFolder').onclick = openAddFolder;
